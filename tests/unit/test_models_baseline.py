@@ -6,7 +6,7 @@ import pytest
 import torch
 from PIL import Image
 
-from src.models.baseline import BaselineImpl, MODEL_CONFIGS
+from src.models.baseline import BaselineImpl, CHECKPOINT_FILES
 
 
 class TestBaselineImplUnit:
@@ -32,14 +32,13 @@ class TestBaselineImplUnit:
         impl = BaselineImpl(device="cpu")
         assert impl.num_models == 3
 
-    def test_model_configs(self):
-        """Test that MODEL_CONFIGS has expected structure."""
-        assert len(MODEL_CONFIGS) == 3
+    def test_checkpoint_files(self):
+        """Test that CHECKPOINT_FILES has expected structure."""
+        assert len(CHECKPOINT_FILES) == 3
         
-        for config in MODEL_CONFIGS:
-            assert "name" in config
-            assert "image_size" in config
-            assert config["image_size"] > 0
+        for filename in CHECKPOINT_FILES:
+            assert filename.endswith(".pth")
+            assert "efficientdet" in filename
 
     def test_predict_without_load_raises(self, sample_image):
         """Test that predict raises if models not loaded."""
@@ -261,7 +260,8 @@ class TestBaselineImplUnit:
         
         outputs = impl.predict(sample_image)
         
-        expected_names = [config["name"] for config in MODEL_CONFIGS]
+        # Model names are derived from checkpoint filenames (without .pth)
+        expected_names = [f.replace(".pth", "") for f in CHECKPOINT_FILES]
         actual_names = [output.model_name for output in outputs]
         
         assert actual_names == expected_names

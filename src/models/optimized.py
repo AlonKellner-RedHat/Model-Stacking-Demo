@@ -94,6 +94,10 @@ class OptimizedImpl(BaseModelImpl):
         self.optimization_stack = OptimizationStack(self.optimization_config)
         self.models = self.optimization_stack.apply_all(self.models, self.device)
         
+        # Create super model if grouped optimization is enabled
+        if self.optimization_config.grouped_super_model_enabled:
+            self.optimization_stack.create_super_model(self.models, self.device)
+        
         # Setup transform
         self._transform = transforms.Compose([
             transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
@@ -187,6 +191,10 @@ class OptimizedImpl(BaseModelImpl):
         if not self._warmup_done:
             self.warmup()
         
+        # Use grouped super model forward path if enabled
+        if self.optimization_stack and self.optimization_stack.uses_grouped_forward:
+            return self._predict_grouped(input_tensor)
+        
         # Use vmap forward path if enabled
         if self.optimization_stack and self.optimization_stack.uses_vmap_forward:
             return self._predict_vmap(input_tensor)
@@ -269,6 +277,69 @@ class OptimizedImpl(BaseModelImpl):
             if detections is not None and len(detections) > 0:
                 det = detections[0]  # First batch item
                 # Filter valid detections (score > 0)
+                valid_mask = det[:, 4] > 0
+                det = det[valid_mask]
+                
+                if len(det) > 0:
+                    boxes = det[:, :4].float()
+                    scores = det[:, 4].float()
+                    labels = det[:, 5].long()
+                else:
+                    boxes = torch.empty((0, 4), device=self.device)
+                    scores = torch.empty((0,), device=self.device)
+                    labels = torch.empty((0,), dtype=torch.long, device=self.device)
+            else:
+                boxes = torch.empty((0, 4), device=self.device)
+                scores = torch.empty((0,), device=self.device)
+                labels = torch.empty((0,), dtype=torch.long, device=self.device)
+            
+            outputs.append(DetectionOutput(
+                boxes=boxes,
+                scores=scores,
+                labels=labels,
+                model_name=model_name,
+                inference_time_ms=time_per_model,
+            ))
+        
+        return outputs
+    
+    def _predict_grouped(self, input_tensor: torch.Tensor) -> List[DetectionOutput]:
+        """Run inference using grouped super model forward pass."""
+        super_model = self.optimization_stack.super_model
+        
+        if super_model is None:
+            raise RuntimeError("Super model not initialized. Call load() first.")
+        
+        # Synchronize for accurate timing
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        elif self.device.type == "mps":
+            torch.mps.synchronize()
+        
+        start_time = time.perf_counter()
+        
+        with torch.no_grad():
+            if self.optimization_config.mixed_precision_enabled:
+                with torch.autocast(
+                    device_type=self.device.type,
+                    dtype=self.optimization_config.dtype,
+                ):
+                    detections_list = super_model.detect(input_tensor, self.models)
+            else:
+                detections_list = super_model.detect(input_tensor, self.models)
+        
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        elif self.device.type == "mps":
+            torch.mps.synchronize()
+        
+        total_time_ms = (time.perf_counter() - start_time) * 1000
+        time_per_model = total_time_ms / len(self.models)
+        
+        outputs = []
+        for i, (det, model_name) in enumerate(zip(detections_list, self.model_names)):
+            # Filter valid detections
+            if det is not None and len(det) > 0:
                 valid_mask = det[:, 4] > 0
                 det = det[valid_mask]
                 

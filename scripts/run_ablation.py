@@ -158,6 +158,19 @@ def get_ablation_configs() -> Dict[str, OptimizationConfig]:
             mixed_precision_enabled=True,
             dtype=torch.float16,
         ),
+        
+        # Grouped super model optimization
+        # Fuses all models into a single "super model" using grouped convolutions
+        "grouped_super_model": OptimizationConfig(
+            grouped_super_model_enabled=True,
+        ),
+        # Grouped with compile (compile + grouped)
+        "grouped+compile": OptimizationConfig(
+            grouped_super_model_enabled=True,
+            compile_enabled=True,
+            compile_backend="inductor",
+            compile_mode="default",
+        ),
     }
     
     return configs

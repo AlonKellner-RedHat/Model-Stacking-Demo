@@ -177,6 +177,8 @@ We tested composable optimizations to find the best configuration:
 | torch.compile (default) | 43.0 | 23.3 RPS | 2.24x | IoU=1.0 (exact) | ✅ Great |
 | torch.compile (reduce-overhead) | 44.3 | 22.6 RPS | 2.18x | IoU=1.0 (exact) | ✅ Great |
 | Baseline (no optimizations) | 96.4 | 10.4 RPS | 1.00x | Reference | Reference |
+| grouped+compile | 100.9 | 9.9 RPS | 0.96x | IoU=1.0 (exact) | ⚠️ Not faster |
+| grouped_super_model | 103.1 | 9.7 RPS | 0.94x | IoU=1.0 (exact) | ⚠️ Not faster |
 | FP16 only | 613.2 | 1.6 RPS | 0.16x | IoU=0.9995 | ❌ Slower |
 | compile + FP16 | 628.3 | 1.6 RPS | 0.15x | IoU=0.9995 | ❌ Slower |
 
@@ -248,9 +250,32 @@ All 3 models share the same backbone architecture (EfficientNet-B0 + BiFPN), ena
 3. Class heads run sequentially (different output shapes: 90, 7, 20 classes)
 4. `torch.compile` is applied internally for optimal kernel fusion
 
-### Phase 4: Full Fusion (Future)
-- Grouped convolutions for parallel class heads
-- Core ML conversion
+### Phase 4: Grouped Super Model ✅ (COMPLETED - Not Faster on MPS)
+
+We implemented "Static Fusion" using grouped convolutions to fuse multiple models into a single super model:
+
+| Config | Latency | Speedup | Output Quality |
+|--------|---------|---------|----------------|
+| grouped_super_model | 103 ms | 0.94x | IoU=1.0 (exact) |
+| grouped+compile | 101 ms | 0.96x | IoU=1.0 (exact) |
+
+**Implementation:**
+- `GroupedConv2d`: Fuses N Conv2d layers using `groups=N`
+- `GroupedBatchNorm2d`: Stacks running stats across N batchnorms
+- `SuperEfficientDet`: Wraps backbone/FPN/box_net with grouped modules
+- Class heads remain separate (different output dimensions)
+
+**Why it's not faster on MPS:**
+1. The current implementation uses a **wrapper approach** that still runs modules sequentially
+2. True layer fusion would require rewriting each layer type with grouped operations
+3. MPS may have overhead for grouped convolutions vs separate convolutions
+4. The benefit of grouped convolutions is primarily for **export to TensorRT/ONNX**
+
+**Key benefit:** Exportable static graph for deployment on NVIDIA/TensorRT.
+
+### Phase 5: Future Optimizations
+- Core ML conversion (Apple Neural Engine)
+- TensorRT export for NVIDIA GPUs  
 - Target: **< 20 ms** (enabling 30+ FPS)
 
 ### ~~Phase: FP16 Quantization~~ ❌

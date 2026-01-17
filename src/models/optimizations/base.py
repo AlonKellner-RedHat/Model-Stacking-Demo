@@ -28,6 +28,9 @@ class OptimizationConfig:
     # vmap backbone options
     vmap_backbone_enabled: bool = False
     
+    # Grouped super model options
+    grouped_super_model_enabled: bool = False
+    
     def get_enabled_optimizations(self) -> List[str]:
         """Get list of enabled optimization names."""
         enabled = []
@@ -39,6 +42,8 @@ class OptimizationConfig:
             enabled.append(f"batched(bs={self.batch_size})")
         if self.vmap_backbone_enabled:
             enabled.append("vmap_backbone")
+        if self.grouped_super_model_enabled:
+            enabled.append("grouped_super_model")
         return enabled if enabled else ["none"]
     
     def __str__(self) -> str:
@@ -92,6 +97,7 @@ class OptimizationStack:
         self.config = config
         self.optimizations: List[Optimization] = []
         self._vmap_optimization: Optional[Any] = None  # Special handling for vmap
+        self._super_model: Optional[Any] = None  # Special handling for grouped super model
         self._build_stack()
     
     def _build_stack(self) -> None:
@@ -145,6 +151,23 @@ class OptimizationStack:
     def vmap_optimization(self) -> Optional[Any]:
         """Get the vmap optimization instance if enabled."""
         return self._vmap_optimization
+    
+    @property
+    def uses_grouped_forward(self) -> bool:
+        """Check if grouped super model is enabled."""
+        return self.config.grouped_super_model_enabled
+    
+    @property
+    def super_model(self) -> Optional[Any]:
+        """Get the super model instance if enabled."""
+        return self._super_model
+    
+    def create_super_model(self, models: List[nn.Module], device: torch.device) -> None:
+        """Create the grouped super model from base models."""
+        if self.config.grouped_super_model_enabled:
+            from .super_model import SuperEfficientDet
+            self._super_model = SuperEfficientDet.from_models(models, device=device)
+            self._super_model.eval()
     
     def forward(
         self, 
