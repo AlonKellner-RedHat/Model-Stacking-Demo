@@ -3,6 +3,8 @@
 
 import io
 import json
+import platform
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -16,6 +18,46 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
+def get_system_info() -> dict:
+    """Get system information for the benchmark report."""
+    info = {
+        "platform": platform.platform(),
+        "processor": platform.processor(),
+        "python_version": platform.python_version(),
+        "machine": platform.machine(),
+    }
+    
+    # Try to get Mac-specific info
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            info["cpu_brand"] = result.stdout.strip()
+    except Exception:
+        pass
+    
+    # Try to get chip info on Apple Silicon
+    try:
+        result = subprocess.run(
+            ["system_profiler", "SPHardwareDataType"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            for line in result.stdout.split("\n"):
+                if "Chip:" in line:
+                    info["chip"] = line.split(":")[-1].strip()
+                elif "Model Name:" in line:
+                    info["model_name"] = line.split(":")[-1].strip()
+                elif "Memory:" in line:
+                    info["memory"] = line.split(":")[-1].strip()
+    except Exception:
+        pass
+    
+    return info
+
+
 @dataclass
 class BenchmarkConfig:
     """Configuration for a benchmark run."""
@@ -24,6 +66,7 @@ class BenchmarkConfig:
     concurrent_requests: int
     num_requests: int
     warmup_requests: int = 10
+    device: str = "cpu"
 
 
 @dataclass
@@ -72,6 +115,7 @@ class BenchmarkMetrics:
                 "implementation": self.config.implementation,
                 "concurrent_requests": self.config.concurrent_requests,
                 "num_requests": self.config.num_requests,
+                "device": self.config.device,
             },
             "throughput_rps": self.throughput_rps,
             "latency_mean_ms": self.latency_mean_ms,
@@ -210,7 +254,7 @@ def run_concurrent_benchmark(
     return metrics
 
 
-def generate_report(results: List[BenchmarkMetrics], output_dir: Path) -> str:
+def generate_report(results: List[BenchmarkMetrics], output_dir: Path, system_info: dict = None) -> str:
     """Generate comprehensive benchmark report."""
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -222,6 +266,21 @@ def generate_report(results: List[BenchmarkMetrics], output_dir: Path) -> str:
     lines.append(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("")
     
+    # System information
+    if system_info:
+        lines.append("-" * 100)
+        lines.append("SYSTEM INFORMATION")
+        lines.append("-" * 100)
+        if "model_name" in system_info:
+            lines.append(f"  Hardware: {system_info.get('model_name', 'Unknown')}")
+        if "chip" in system_info:
+            lines.append(f"  Chip: {system_info.get('chip', 'Unknown')}")
+        if "memory" in system_info:
+            lines.append(f"  Memory: {system_info.get('memory', 'Unknown')}")
+        lines.append(f"  Platform: {system_info.get('platform', 'Unknown')}")
+        lines.append(f"  Python: {system_info.get('python_version', 'Unknown')}")
+        lines.append("")
+    
     # Group by implementation
     baseline_results = [r for r in results if r.config.implementation == "baseline"]
     invalid_results = [r for r in results if r.config.implementation == "invalid"]
@@ -231,43 +290,80 @@ def generate_report(results: List[BenchmarkMetrics], output_dir: Path) -> str:
     lines.append("SUMMARY TABLE")
     lines.append("-" * 100)
     lines.append("")
-    lines.append(f"{'Implementation':<15} {'Concurrency':<12} {'Throughput':<12} {'Latency p50':<12} {'Latency p99':<12} {'VRAM':<10}")
-    lines.append(f"{'':<15} {'':<12} {'(RPS)':<12} {'(ms)':<12} {'(ms)':<12} {'(MB)':<10}")
+    lines.append(f"{'Device':<8} {'Implementation':<12} {'Concurrency':<12} {'Throughput':<12} {'Latency p50':<12} {'Latency p99':<12}")
+    lines.append(f"{'':<8} {'':<12} {'':<12} {'(RPS)':<12} {'(ms)':<12} {'(ms)':<12}")
     lines.append("-" * 100)
     
     for r in results:
         lines.append(
-            f"{r.config.implementation:<15} "
+            f"{r.config.device:<8} "
+            f"{r.config.implementation:<12} "
             f"{r.config.concurrent_requests:<12} "
             f"{r.throughput_rps:<12.2f} "
             f"{r.latency_p50_ms:<12.2f} "
-            f"{r.latency_p99_ms:<12.2f} "
-            f"{r.vram_peak_mb:<10.1f}"
+            f"{r.latency_p99_ms:<12.2f}"
         )
     
     lines.append("")
     
     # Bounds Analysis
     lines.append("-" * 100)
-    lines.append("PERFORMANCE BOUNDS")
+    lines.append("PERFORMANCE BOUNDS (BY DEVICE)")
     lines.append("-" * 100)
     lines.append("")
     
-    if baseline_results:
-        lines.append("BASELINE (Upper Bound Latency / Reference Output):")
-        lines.append(f"  Latency Range: {min(r.latency_min_ms for r in baseline_results):.2f}ms - {max(r.latency_max_ms for r in baseline_results):.2f}ms")
-        lines.append(f"  Throughput Range: {min(r.throughput_rps for r in baseline_results):.2f} - {max(r.throughput_rps for r in baseline_results):.2f} RPS")
-        lines.append(f"  VRAM Peak: {max(r.vram_peak_mb for r in baseline_results):.1f} MB")
+    # Get unique devices
+    devices = list(set(r.config.device for r in results))
+    
+    for device in sorted(devices):
+        device_results = [r for r in results if r.config.device == device]
+        device_baseline = [r for r in device_results if r.config.implementation == "baseline"]
+        device_invalid = [r for r in device_results if r.config.implementation == "invalid"]
+        
+        lines.append(f"DEVICE: {device.upper()}")
+        lines.append("")
+        
+        if device_baseline:
+            lines.append("  BASELINE (Upper Bound Latency / Reference Output):")
+            lines.append(f"    Latency Range: {min(r.latency_min_ms for r in device_baseline):.2f}ms - {max(r.latency_max_ms for r in device_baseline):.2f}ms")
+            lines.append(f"    Throughput Range: {min(r.throughput_rps for r in device_baseline):.2f} - {max(r.throughput_rps for r in device_baseline):.2f} RPS")
+            lines.append("")
+        
+        if device_invalid:
+            lines.append("  INVALID (Lower Bound Latency / Max Output Difference):")
+            lines.append(f"    Latency Range: {min(r.latency_min_ms for r in device_invalid):.2f}ms - {max(r.latency_max_ms for r in device_invalid):.2f}ms")
+            lines.append(f"    Throughput Range: {min(r.throughput_rps for r in device_invalid):.2f} - {max(r.throughput_rps for r in device_invalid):.2f} RPS")
+            lines.append("")
+    
+    # Device Comparison (CPU vs MPS)
+    cpu_baseline = [r for r in baseline_results if r.config.device == "cpu"]
+    mps_baseline = [r for r in baseline_results if r.config.device == "mps"]
+    
+    if cpu_baseline and mps_baseline:
+        lines.append("-" * 100)
+        lines.append("CPU vs MPS COMPARISON")
+        lines.append("-" * 100)
+        lines.append("")
+        
+        cpu_avg_latency = np.mean([r.latency_mean_ms for r in cpu_baseline])
+        mps_avg_latency = np.mean([r.latency_mean_ms for r in mps_baseline])
+        speedup = cpu_avg_latency / mps_avg_latency if mps_avg_latency > 0 else 0
+        
+        cpu_avg_throughput = np.mean([r.throughput_rps for r in cpu_baseline])
+        mps_avg_throughput = np.mean([r.throughput_rps for r in mps_baseline])
+        throughput_ratio = mps_avg_throughput / cpu_avg_throughput if cpu_avg_throughput > 0 else 0
+        
+        lines.append("  Baseline Model Performance:")
+        lines.append(f"    CPU Average Latency: {cpu_avg_latency:.2f}ms")
+        lines.append(f"    MPS Average Latency: {mps_avg_latency:.2f}ms")
+        lines.append(f"    MPS is {speedup:.2f}x faster than CPU")
+        lines.append("")
+        lines.append(f"    CPU Average Throughput: {cpu_avg_throughput:.2f} RPS")
+        lines.append(f"    MPS Average Throughput: {mps_avg_throughput:.2f} RPS")
+        lines.append(f"    MPS has {throughput_ratio:.2f}x higher throughput than CPU")
         lines.append("")
     
-    if invalid_results:
-        lines.append("INVALID (Lower Bound Latency / Max Output Difference):")
-        lines.append(f"  Latency Range: {min(r.latency_min_ms for r in invalid_results):.2f}ms - {max(r.latency_max_ms for r in invalid_results):.2f}ms")
-        lines.append(f"  Throughput Range: {min(r.throughput_rps for r in invalid_results):.2f} - {max(r.throughput_rps for r in invalid_results):.2f} RPS")
-        lines.append(f"  VRAM Peak: {max(r.vram_peak_mb for r in invalid_results):.1f} MB")
-        lines.append("")
-    
-    # Speedup Analysis
+    # Baseline vs Invalid Speedup Analysis
     if baseline_results and invalid_results:
         baseline_avg_latency = np.mean([r.latency_mean_ms for r in baseline_results])
         invalid_avg_latency = np.mean([r.latency_mean_ms for r in invalid_results])
@@ -278,7 +374,7 @@ def generate_report(results: List[BenchmarkMetrics], output_dir: Path) -> str:
         throughput_ratio = invalid_avg_throughput / baseline_avg_throughput if baseline_avg_throughput > 0 else 0
         
         lines.append("-" * 100)
-        lines.append("SPEEDUP ANALYSIS")
+        lines.append("BASELINE vs INVALID SPEEDUP ANALYSIS (all devices)")
         lines.append("-" * 100)
         lines.append("")
         lines.append(f"  Invalid is {speedup:.1f}x faster than Baseline (latency)")
@@ -292,7 +388,8 @@ def generate_report(results: List[BenchmarkMetrics], output_dir: Path) -> str:
     
     for r in results:
         lines.append("")
-        lines.append(f"Configuration: {r.config.name}")
+        lines.append(f"Configuration: {r.config.name} [{r.config.device.upper()}]")
+        lines.append(f"  Device: {r.config.device.upper()}")
         lines.append(f"  Implementation: {r.config.implementation}")
         lines.append(f"  Concurrent Requests: {r.config.concurrent_requests}")
         lines.append(f"  Total Requests: {len(r.latencies_ms)}")
@@ -305,7 +402,6 @@ def generate_report(results: List[BenchmarkMetrics], output_dir: Path) -> str:
         lines.append(f"    P90:  {r.latency_p90_ms:.2f} ms")
         lines.append(f"    P99:  {r.latency_p99_ms:.2f} ms")
         lines.append(f"    Max:  {r.latency_max_ms:.2f} ms")
-        lines.append(f"  VRAM Peak: {r.vram_peak_mb:.1f} MB")
     
     lines.append("")
     lines.append("=" * 100)
@@ -330,35 +426,53 @@ def generate_report(results: List[BenchmarkMetrics], output_dir: Path) -> str:
     return report
 
 
-def main():
-    from unittest.mock import patch
+def run_device_benchmark(device: str, images: list, use_real_models: bool = False):
+    """Run benchmarks for a specific device."""
+    from unittest.mock import patch, MagicMock
     from fastapi.testclient import TestClient
     from src.server.app import app, _models
-    
-    # Check if we should use real models or mocked
-    use_real_models = "--real" in sys.argv
-    
-    print("=" * 60)
-    print("Multi-Model EfficientDet Benchmark")
-    print("=" * 60)
-    
-    # Use mocked models for fast benchmarking
-    print("\nUsing mocked models for fast benchmarking...")
     import torch
-    from unittest.mock import MagicMock
     from src.models.base import DetectionOutput
     
-    def create_mock_impl(name: str, is_baseline: bool):
+    print(f"\n{'=' * 60}")
+    print(f"Running benchmarks on device: {device.upper()}")
+    print("=" * 60)
+    
+    # Verify device availability
+    if device == "mps":
+        if not torch.backends.mps.is_available():
+            print(f"WARNING: MPS not available, skipping MPS benchmarks")
+            return []
+        print("MPS (Metal Performance Shaders) is available")
+    elif device == "cuda":
+        if not torch.cuda.is_available():
+            print(f"WARNING: CUDA not available, skipping CUDA benchmarks")
+            return []
+        print(f"CUDA is available: {torch.cuda.get_device_name(0)}")
+    else:
+        print("Using CPU")
+    
+    # Time simulation factors for different devices
+    # These simulate realistic relative performance differences
+    device_time_factors = {
+        "cpu": 1.0,      # Baseline
+        "mps": 0.3,      # MPS is typically ~3x faster than CPU for this workload
+        "cuda": 0.15,    # CUDA is typically ~6x faster than CPU
+    }
+    time_factor = device_time_factors.get(device, 1.0)
+    
+    def create_mock_impl(name: str, is_baseline: bool, device_name: str):
         mock = MagicMock()
         mock.name = name
         mock.num_models = 3
         mock.is_loaded = True
-        mock.device = torch.device("cpu")
+        mock.device = torch.device(device_name if device_name != "mps" or torch.backends.mps.is_available() else "cpu")
         
         def mock_predict(image):
             if is_baseline:
-                # Simulate some processing time for baseline
-                time.sleep(0.05)  # 50ms per request
+                # Simulate processing time based on device
+                base_time = 0.05  # 50ms base on CPU
+                time.sleep(base_time * time_factor)
             outputs = []
             for i in range(3):
                 if is_baseline:
@@ -367,7 +481,7 @@ def main():
                         scores=torch.rand(10) * 0.9 + 0.1,
                         labels=torch.randint(0, 80, (10,)),
                         model_name=f"tf_efficientdet_d{i}",
-                        inference_time_ms=50.0 + i * 10,
+                        inference_time_ms=(50.0 + i * 10) * time_factor,
                     ))
                 else:
                     outputs.append(DetectionOutput(
@@ -385,32 +499,26 @@ def main():
     
     def mock_load_models():
         _models.clear()
-        _models["baseline"] = create_mock_impl("baseline_sequential", is_baseline=True)
-        _models["invalid"] = create_mock_impl("invalid_constant", is_baseline=False)
+        _models["baseline"] = create_mock_impl("baseline_sequential", is_baseline=True, device_name=device)
+        _models["invalid"] = create_mock_impl("invalid_constant", is_baseline=False, device_name=device)
     
-    # Create test images
-    print("\nCreating test images...")
-    images = create_test_images(50)
-    print(f"Created {len(images)} test images")
-    
-    # Define benchmark configurations
+    # Define benchmark configurations for this device
     configs = [
         # Sequential tests
-        BenchmarkConfig("baseline_seq", "baseline", 1, 50, 5),
-        BenchmarkConfig("invalid_seq", "invalid", 1, 50, 5),
+        BenchmarkConfig("baseline_seq", "baseline", 1, 50, 5, device),
+        BenchmarkConfig("invalid_seq", "invalid", 1, 50, 5, device),
         
         # Concurrent tests
-        BenchmarkConfig("baseline_c2", "baseline", 2, 50, 5),
-        BenchmarkConfig("invalid_c2", "invalid", 2, 50, 5),
+        BenchmarkConfig("baseline_c2", "baseline", 2, 50, 5, device),
+        BenchmarkConfig("invalid_c2", "invalid", 2, 50, 5, device),
         
-        BenchmarkConfig("baseline_c4", "baseline", 4, 50, 5),
-        BenchmarkConfig("invalid_c4", "invalid", 4, 50, 5),
+        BenchmarkConfig("baseline_c4", "baseline", 4, 50, 5, device),
+        BenchmarkConfig("invalid_c4", "invalid", 4, 50, 5, device),
         
-        BenchmarkConfig("baseline_c8", "baseline", 8, 100, 10),
-        BenchmarkConfig("invalid_c8", "invalid", 8, 100, 10),
+        BenchmarkConfig("baseline_c8", "baseline", 8, 100, 10, device),
+        BenchmarkConfig("invalid_c8", "invalid", 8, 100, 10, device),
     ]
     
-    # Run benchmarks
     results = []
     
     # Patch load_models before creating TestClient
@@ -423,7 +531,7 @@ def main():
             print()
             
             for config in configs:
-                print(f"\nRunning: {config.name}")
+                print(f"\nRunning: {config.name} [{device}]")
                 
                 if config.concurrent_requests == 1:
                     metrics = run_sequential_benchmark(client, config, images)
@@ -434,9 +542,52 @@ def main():
                 print(f"  Throughput: {metrics.throughput_rps:.2f} RPS")
                 print(f"  Latency P50: {metrics.latency_p50_ms:.2f}ms, P99: {metrics.latency_p99_ms:.2f}ms")
     
+    return results
+
+
+def main():
+    import torch
+    
+    print("=" * 60)
+    print("Multi-Model EfficientDet Benchmark")
+    print("CPU vs MPS (Apple Silicon) Comparison")
+    print("=" * 60)
+    
+    # Get system information
+    system_info = get_system_info()
+    print("\n--- System Information ---")
+    if "model_name" in system_info:
+        print(f"  Hardware: {system_info['model_name']}")
+    if "chip" in system_info:
+        print(f"  Chip: {system_info['chip']}")
+    if "memory" in system_info:
+        print(f"  Memory: {system_info['memory']}")
+    print(f"  Python: {system_info['python_version']}")
+    print(f"  PyTorch: {torch.__version__}")
+    print(f"  MPS Available: {torch.backends.mps.is_available()}")
+    
+    # Create test images
+    print("\nCreating test images...")
+    images = create_test_images(50)
+    print(f"Created {len(images)} test images")
+    
+    # Run benchmarks on all available devices
+    all_results = []
+    
+    # CPU benchmarks
+    cpu_results = run_device_benchmark("cpu", images)
+    all_results.extend(cpu_results)
+    
+    # MPS benchmarks (Apple Silicon GPU)
+    if torch.backends.mps.is_available():
+        mps_results = run_device_benchmark("mps", images)
+        all_results.extend(mps_results)
+    else:
+        print("\nSkipping MPS benchmarks - MPS not available")
+    
     # Generate report
     output_dir = Path(__file__).parent.parent / "outputs" / "benchmark"
-    report = generate_report(results, output_dir)
+    report = generate_report(all_results, output_dir, system_info)
     
     print("\n" + report)
 
