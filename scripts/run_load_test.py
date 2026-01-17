@@ -144,6 +144,7 @@ class LoadTestRunner:
         predict_fn: Callable,
         config_name: str,
         mode: str = "embedded",
+        print_result: bool = True,
     ) -> Dict[str, Any]:
         """Run continuous load test measuring throughput.
         
@@ -232,7 +233,8 @@ class LoadTestRunner:
                 "error": "No successful requests",
             }
         
-        self._print_result(result)
+        if print_result:
+            self._print_result(result)
         self.results.append(result)
         
         return result
@@ -289,14 +291,16 @@ class LoadTestRunner:
                 return impl.predict(self.test_image)
             mode = "embedded"
         
-        # Run load test
-        result = self._run_continuous_load_test(predict_fn, config_name, mode)
+        # Run load test (don't print yet for batched tests)
+        result = self._run_continuous_load_test(predict_fn, config_name, mode, print_result=(batch_size == 1))
         
         # For batched tests, adjust the metrics to be per-image
         if batch_size > 1:
             result["batch_size"] = batch_size
             result["images_per_second"] = round(result["rps"] * batch_size, 2)
             result["latency_per_image_ms"] = round(result["latency_mean_ms"] / batch_size, 2)
+            # Now print with full batch info
+            self._print_result(result)
         
         return result
     
@@ -499,14 +503,29 @@ class LoadTestRunner:
         print(f"Concurrent Users: {result['users']}")
         print(f"Spawn Rate:       {result['spawn_rate']}/s")
         print(f"Device:           {result['device']}")
+        
+        # Show batch info if present
+        if "batch_size" in result:
+            print(f"Batch Size:       {result['batch_size']}")
+        
         print()
         print("Throughput:")
         print(f"  Total Requests:  {result['total_requests']:,}")
         print(f"  Actual RPS:      {result['rps']}")
+        
+        # Show images/second for batched tests
+        if "images_per_second" in result:
+            print(f"  Images/second:   {result['images_per_second']}")
+        
         print(f"  Failures:        {result['total_failures']} ({result['fail_ratio']}%)")
         print()
         print("Latency (ms):")
         print(f"  Mean:            {result['latency_mean_ms']}")
+        
+        # Show per-image latency for batched tests
+        if "latency_per_image_ms" in result:
+            print(f"  Per-image:       {result['latency_per_image_ms']}")
+        
         print(f"  Min:             {result['latency_min_ms']}")
         print(f"  Max:             {result['latency_max_ms']}")
         print(f"  Median (p50):    {result['latency_p50_ms']}")

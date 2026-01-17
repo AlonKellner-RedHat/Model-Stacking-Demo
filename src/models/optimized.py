@@ -153,6 +153,31 @@ class OptimizedImpl(BaseModelImpl):
             tensor = tensor.to(dtype=self.optimization_config.dtype)
         
         return tensor
+    
+    def _preprocess_batch(self, images: List[Image.Image]) -> torch.Tensor:
+        """Preprocess multiple images into a batched tensor.
+        
+        Args:
+            images: List of PIL Images
+            
+        Returns:
+            Batched tensor of shape [N, 3, H, W]
+        """
+        tensors = []
+        for image in images:
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            tensor = self._transform(image)
+            tensors.append(tensor)
+        
+        # Stack into batch tensor [N, 3, H, W]
+        batch_tensor = torch.stack(tensors).to(self.device)
+        
+        # Apply precision optimization if enabled
+        if self.optimization_config.mixed_precision_enabled:
+            batch_tensor = batch_tensor.to(dtype=self.optimization_config.dtype)
+        
+        return batch_tensor
 
     def warmup(self, num_iterations: int = 3) -> None:
         """Warmup models with dummy inference.
@@ -418,8 +443,323 @@ class OptimizedImpl(BaseModelImpl):
         return outputs
 
     def predict_batch(self, images: List[Image.Image]) -> List[List[DetectionOutput]]:
-        """Run inference on multiple images."""
-        return [self.predict(image) for image in images]
+        """Run true batched inference on multiple images.
+        
+        This stacks all images into a single tensor and runs one forward pass
+        per model, then splits the outputs per image. This is more efficient
+        than processing images sequentially.
+        
+        Args:
+            images: List of PIL Images
+            
+        Returns:
+            List of detection outputs, one list per image
+        """
+        if not self._is_loaded:
+            raise RuntimeError("Models not loaded. Call load() first.")
+        
+        if len(images) == 0:
+            return []
+        
+        if len(images) == 1:
+            # Single image - use regular predict
+            return [self.predict(images[0])]
+        
+        # Warmup on first call
+        if not self._warmup_done:
+            self.warmup()
+        
+        # Preprocess all images into a single batch tensor [N, 3, H, W]
+        batch_tensor = self._preprocess_batch(images)
+        batch_size = batch_tensor.shape[0]
+        
+        # Use appropriate forward path
+        if self.optimization_stack and self.optimization_stack.uses_grouped_forward:
+            return self._predict_batch_grouped(batch_tensor, batch_size)
+        elif self.optimization_stack and self.optimization_stack.uses_vmap_forward:
+            return self._predict_batch_vmap(batch_tensor, batch_size)
+        else:
+            return self._predict_batch_sequential(batch_tensor, batch_size)
+    
+    def _predict_batch_sequential(
+        self, 
+        batch_tensor: torch.Tensor, 
+        batch_size: int
+    ) -> List[List[DetectionOutput]]:
+        """Run batched inference using sequential model forward passes.
+        
+        Each model processes the entire batch at once.
+        
+        Args:
+            batch_tensor: Batched input tensor [N, 3, H, W]
+            batch_size: Number of images in batch
+            
+        Returns:
+            List of detection outputs per image
+        """
+        # Synchronize for accurate timing
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        elif self.device.type == "mps":
+            torch.mps.synchronize()
+        
+        start_time = time.perf_counter()
+        
+        # Run each model on the entire batch
+        all_model_outputs = []  # [num_models][batch_size][detections]
+        
+        for model, model_name in zip(self.models, self.model_names):
+            with torch.no_grad():
+                if self.optimization_config.mixed_precision_enabled:
+                    with torch.autocast(
+                        device_type=self.device.type,
+                        dtype=self.optimization_config.dtype,
+                    ):
+                        detections = model(batch_tensor)
+                else:
+                    detections = model(batch_tensor)
+            
+            # detections shape: [batch_size, max_det, 6]
+            all_model_outputs.append((model_name, detections))
+        
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        elif self.device.type == "mps":
+            torch.mps.synchronize()
+        
+        total_time_ms = (time.perf_counter() - start_time) * 1000
+        time_per_image = total_time_ms / batch_size
+        time_per_model_per_image = time_per_image / len(self.models)
+        
+        # Reorganize outputs: [batch_size][num_models]
+        results = []
+        for img_idx in range(batch_size):
+            image_outputs = []
+            for model_name, detections in all_model_outputs:
+                # Get detections for this image
+                if detections is not None and len(detections) > img_idx:
+                    det = detections[img_idx]
+                    boxes = det[:, :4].float()
+                    scores = det[:, 4].float()
+                    labels = det[:, 5].long()
+                else:
+                    boxes = torch.empty((0, 4), device=self.device)
+                    scores = torch.empty((0,), device=self.device)
+                    labels = torch.empty((0,), dtype=torch.long, device=self.device)
+                
+                image_outputs.append(DetectionOutput(
+                    boxes=boxes,
+                    scores=scores,
+                    labels=labels,
+                    model_name=model_name,
+                    inference_time_ms=time_per_model_per_image,
+                ))
+            results.append(image_outputs)
+        
+        return results
+    
+    def _predict_batch_vmap(
+        self, 
+        batch_tensor: torch.Tensor, 
+        batch_size: int
+    ) -> List[List[DetectionOutput]]:
+        """Run batched inference using vmap-optimized forward pass.
+        
+        Args:
+            batch_tensor: Batched input tensor [N, 3, H, W]
+            batch_size: Number of images in batch
+            
+        Returns:
+            List of detection outputs per image
+        """
+        from effdet.bench import _post_process, _batch_detection
+        
+        vmap_opt = self.optimization_stack.vmap_optimization
+        
+        # Synchronize for accurate timing
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        elif self.device.type == "mps":
+            torch.mps.synchronize()
+        
+        start_time = time.perf_counter()
+        
+        # Run vmapped forward on the batch
+        with torch.no_grad():
+            if self.optimization_config.mixed_precision_enabled:
+                with torch.autocast(
+                    device_type=self.device.type,
+                    dtype=self.optimization_config.dtype,
+                ):
+                    fpn_features_all, box_outs_all, class_outs_all = vmap_opt.wrap_forward(
+                        self.models, batch_tensor
+                    )
+            else:
+                fpn_features_all, box_outs_all, class_outs_all = vmap_opt.wrap_forward(
+                    self.models, batch_tensor
+                )
+        
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        elif self.device.type == "mps":
+            torch.mps.synchronize()
+        
+        total_time_ms = (time.perf_counter() - start_time) * 1000
+        time_per_image = total_time_ms / batch_size
+        time_per_model_per_image = time_per_image / len(self.models)
+        
+        # Post-process and reorganize outputs: [batch_size][num_models]
+        results = [[] for _ in range(batch_size)]
+        
+        for model_idx, model in enumerate(self.models):
+            model_name = self.model_names[model_idx]
+            bench = model  # DetBenchPredict wrapper
+            
+            # Get outputs for this model
+            model_box_out = [b[model_idx] for b in box_outs_all]
+            model_class_out = class_outs_all[model_idx]
+            
+            # Run effdet's post-processing for the entire batch
+            class_out_pp, box_out_pp, indices, classes = _post_process(
+                model_class_out,
+                model_box_out,
+                num_levels=bench.num_levels,
+                num_classes=bench.num_classes,
+                max_detection_points=bench.max_detection_points,
+            )
+            
+            # Run NMS for the batch
+            detections = _batch_detection(
+                batch_size,
+                class_out_pp,
+                box_out_pp,
+                bench.anchors.boxes,
+                indices,
+                classes,
+                img_scale=None,
+                img_size=None,
+                max_det_per_image=bench.max_det_per_image,
+                soft_nms=bench.soft_nms,
+            )
+            
+            # Split detections per image
+            for img_idx in range(batch_size):
+                if detections is not None and len(detections) > img_idx:
+                    det = detections[img_idx]
+                    # Filter valid detections (score > 0)
+                    valid_mask = det[:, 4] > 0
+                    det = det[valid_mask]
+                    
+                    if len(det) > 0:
+                        boxes = det[:, :4].float()
+                        scores = det[:, 4].float()
+                        labels = det[:, 5].long()
+                    else:
+                        boxes = torch.empty((0, 4), device=self.device)
+                        scores = torch.empty((0,), device=self.device)
+                        labels = torch.empty((0,), dtype=torch.long, device=self.device)
+                else:
+                    boxes = torch.empty((0, 4), device=self.device)
+                    scores = torch.empty((0,), device=self.device)
+                    labels = torch.empty((0,), dtype=torch.long, device=self.device)
+                
+                results[img_idx].append(DetectionOutput(
+                    boxes=boxes,
+                    scores=scores,
+                    labels=labels,
+                    model_name=model_name,
+                    inference_time_ms=time_per_model_per_image,
+                ))
+        
+        return results
+    
+    def _predict_batch_grouped(
+        self, 
+        batch_tensor: torch.Tensor, 
+        batch_size: int
+    ) -> List[List[DetectionOutput]]:
+        """Run batched inference using grouped super model.
+        
+        Args:
+            batch_tensor: Batched input tensor [N, 3, H, W]
+            batch_size: Number of images in batch
+            
+        Returns:
+            List of detection outputs per image
+        """
+        super_model = self.optimization_stack.super_model
+        
+        if super_model is None:
+            raise RuntimeError("Super model not initialized. Call load() first.")
+        
+        # Synchronize for accurate timing
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        elif self.device.type == "mps":
+            torch.mps.synchronize()
+        
+        start_time = time.perf_counter()
+        
+        # Run super model on the batch
+        with torch.no_grad():
+            if self.optimization_config.mixed_precision_enabled:
+                with torch.autocast(
+                    device_type=self.device.type,
+                    dtype=self.optimization_config.dtype,
+                ):
+                    # detect returns [num_models] list of [batch_size, max_det, 6]
+                    detections_per_model = super_model.detect(batch_tensor, self.models)
+            else:
+                detections_per_model = super_model.detect(batch_tensor, self.models)
+        
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        elif self.device.type == "mps":
+            torch.mps.synchronize()
+        
+        total_time_ms = (time.perf_counter() - start_time) * 1000
+        time_per_image = total_time_ms / batch_size
+        time_per_model_per_image = time_per_image / len(self.models)
+        
+        # Reorganize outputs: [batch_size][num_models]
+        results = [[] for _ in range(batch_size)]
+        
+        for model_idx, (model_name, detections) in enumerate(zip(self.model_names, detections_per_model)):
+            for img_idx in range(batch_size):
+                # Handle batched detections
+                if detections is not None:
+                    if detections.dim() == 3:
+                        # [batch_size, max_det, 6]
+                        det = detections[img_idx]
+                    else:
+                        # [max_det, 6] - unbatched
+                        det = detections if img_idx == 0 else torch.empty((0, 6), device=self.device)
+                    
+                    valid_mask = det[:, 4] > 0
+                    det = det[valid_mask]
+                    
+                    if len(det) > 0:
+                        boxes = det[:, :4].float()
+                        scores = det[:, 4].float()
+                        labels = det[:, 5].long()
+                    else:
+                        boxes = torch.empty((0, 4), device=self.device)
+                        scores = torch.empty((0,), device=self.device)
+                        labels = torch.empty((0,), dtype=torch.long, device=self.device)
+                else:
+                    boxes = torch.empty((0, 4), device=self.device)
+                    scores = torch.empty((0,), device=self.device)
+                    labels = torch.empty((0,), dtype=torch.long, device=self.device)
+                
+                results[img_idx].append(DetectionOutput(
+                    boxes=boxes,
+                    scores=scores,
+                    labels=labels,
+                    model_name=model_name,
+                    inference_time_ms=time_per_model_per_image,
+                ))
+        
+        return results
 
     def get_optimization_info(self) -> Dict[str, Any]:
         """Get information about enabled optimizations."""
