@@ -172,15 +172,19 @@ We tested composable optimizations to find the best configuration:
 
 | Configuration | Latency (ms) | Throughput | Speedup | Output Quality | Status |
 |---------------|--------------|------------|---------|----------------|--------|
-| **vmap_backbone** | **37.3** | **26.8 RPS** | **2.58x** | IoU=1.0 (exact) | ✅ **Best** |
-| vmap + FP16 | 38.1 | 26.3 RPS | 2.53x | IoU=0.9995 | ✅ Excellent |
-| torch.compile (default) | 43.0 | 23.3 RPS | 2.24x | IoU=1.0 (exact) | ✅ Great |
-| torch.compile (reduce-overhead) | 44.3 | 22.6 RPS | 2.18x | IoU=1.0 (exact) | ✅ Great |
-| Baseline (no optimizations) | 96.4 | 10.4 RPS | 1.00x | Reference | Reference |
-| grouped+compile | 100.9 | 9.9 RPS | 0.96x | IoU=1.0 (exact) | ⚠️ Not faster |
-| grouped_super_model | 103.1 | 9.7 RPS | 0.94x | IoU=1.0 (exact) | ⚠️ Not faster |
-| FP16 only | 613.2 | 1.6 RPS | 0.16x | IoU=0.9995 | ❌ Slower |
-| compile + FP16 | 628.3 | 1.6 RPS | 0.15x | IoU=0.9995 | ❌ Slower |
+| **vmap_backbone** | **37.4** | **26.8 RPS** | **2.69x** | IoU=1.0 (exact) | ✅ **Best** |
+| vmap + FP16 | 38.0 | 26.3 RPS | 2.64x | IoU=0.9995 | ✅ Excellent |
+| torchserve_vmap | 41.1 | 24.3 RPS | 2.44x | IoU=0.78* | ✅ Production |
+| torch.compile (default) | 42.6 | 23.5 RPS | 2.36x | IoU=1.0 (exact) | ✅ Great |
+| torch.compile (reduce-overhead) | 44.5 | 22.5 RPS | 2.26x | IoU=1.0 (exact) | ✅ Great |
+| Baseline (no optimizations) | 100.5 | 10.0 RPS | 1.00x | Reference | Reference |
+| grouped_super_model | 101.2 | 9.9 RPS | 0.99x | IoU=1.0 (exact) | ⚠️ Not faster |
+| torchserve_baseline | 103.4 | 9.7 RPS | 0.97x | IoU=0.78* | ⚠️ JPEG loss |
+| grouped+compile | 104.5 | 9.6 RPS | 0.96x | IoU=1.0 (exact) | ⚠️ Not faster |
+| FP16 only | 596.5 | 1.7 RPS | 0.17x | IoU=0.9995 | ❌ Slower |
+| compile + FP16 | 620.9 | 1.6 RPS | 0.16x | IoU=0.9995 | ❌ Slower |
+
+*TorchServe IoU=0.78 is due to JPEG encoding (simulates real HTTP traffic), not model error.
 
 ### Key Findings
 
@@ -273,7 +277,52 @@ We implemented "Static Fusion" using grouped convolutions to fuse multiple model
 
 **Key benefit:** Exportable static graph for deployment on NVIDIA/TensorRT.
 
-### Phase 5: Future Optimizations
+### Phase 5: TorchServe Integration ✅ (COMPLETED)
+
+We integrated TorchServe as a serving option with two modes:
+
+| Config | Latency | Speedup | Output Quality | Notes |
+|--------|---------|---------|----------------|-------|
+| torchserve_baseline | 103.4 ms | 0.97x | IoU=0.78 | JPEG encoding overhead |
+| torchserve_vmap_backbone | 41.1 ms | 2.44x | IoU=0.78 | Best TorchServe config |
+
+**Implementation:**
+- **External Mode**: TorchServe runs as separate process, HTTP API
+- **Embedded Mode**: Direct handler invocation (no network overhead)
+- Custom `EfficientDetHandler` wraps existing model implementations
+
+**Key Findings:**
+
+1. **TorchServe adds ~3ms overhead** vs direct inference:
+   - `vmap_backbone` direct: 37.4ms
+   - `torchserve_vmap_backbone`: 41.1ms
+   - Overhead: 3.7ms (~10%)
+
+2. **JPEG encoding affects output quality**:
+   - TorchServe simulates real HTTP traffic (images as bytes)
+   - JPEG lossy compression introduces differences
+   - IoU drops from 1.0 to ~0.78 due to image compression
+   - This is **expected behavior** for production serving
+
+3. **Best TorchServe configuration**: `torchserve_vmap_backbone`
+   - 2.44x faster than baseline (41ms vs 103ms)
+   - Enables interactive serving (< 50ms target)
+
+**Usage:**
+```bash
+# Create MAR archive
+uv run python scripts/create_mar.py --optimization vmap_backbone
+
+# Start TorchServe
+torchserve --start --model-store model_store --models all
+
+# Or use embedded mode for benchmarking
+```
+
+**Future**: TorchScript, ONNX, and TensorRT export via handler configuration.
+
+### Phase 6: Future Optimizations
+- TorchScript export for TorchServe
 - Core ML conversion (Apple Neural Engine)
 - TensorRT export for NVIDIA GPUs  
 - Target: **< 20 ms** (enabling 30+ FPS)
