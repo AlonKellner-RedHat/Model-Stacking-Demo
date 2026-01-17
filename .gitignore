@@ -43,6 +43,11 @@ data/roboflow/
 checkpoints/
 *.pth
 
+# TorchServe
+model_store/
+*.mar
+logs/
+
 # Outputs
 outputs/reference/
 outputs/benchmark/

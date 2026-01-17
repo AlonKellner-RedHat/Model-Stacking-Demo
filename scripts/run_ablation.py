@@ -426,6 +426,108 @@ def generate_ablation_report(results: List[AblationResult], output_dir: Path) ->
     return report
 
 
+def run_torchserve_benchmark(
+    optimization: str,
+    device: str,
+    images: List[bytes],
+    reference_outputs: Optional[Dict[int, List[DetectionOutput]]] = None,
+    num_warmup: int = 5,
+    num_requests: int = 20,
+) -> AblationResult:
+    """Run benchmark for TorchServe embedded mode.
+    
+    This uses the TorchServe handler directly (no HTTP overhead)
+    to measure the handler overhead vs direct model inference.
+    """
+    from src.torchserve.embedded import EmbeddedTorchServe
+    
+    config_name = f"torchserve_{optimization}"
+    
+    print(f"\n{'='*60}")
+    print(f"Testing: {config_name}")
+    print(f"Optimization: {optimization}")
+    print(f"Device: {device}")
+    print("=" * 60)
+    
+    result = AblationResult(
+        config_name=config_name,
+        config=OptimizationConfig(),  # Placeholder, actual config is in handler
+        device=device,
+    )
+    
+    try:
+        # Create and start embedded TorchServe
+        embedded = EmbeddedTorchServe(
+            optimization=optimization,
+            device=device,
+        )
+        embedded.start()
+        
+        # Convert image bytes to PIL Images
+        pil_images = [Image.open(io.BytesIO(img_bytes)) for img_bytes in images]
+        
+        # Warmup
+        print(f"Warming up with {num_warmup} requests...")
+        for i in range(num_warmup):
+            img = pil_images[i % len(pil_images)]
+            embedded.infer(img)
+        
+        # Benchmark
+        print(f"Running {num_requests} requests...")
+        all_comparison_metrics = []
+        
+        for i in range(num_requests):
+            img_idx = i % len(pil_images)
+            img = pil_images[img_idx]
+            
+            start = time.perf_counter()
+            
+            # Use infer_raw to get DetectionOutput for comparison
+            outputs = embedded.infer_raw(img)
+            
+            if device == "mps":
+                torch.mps.synchronize()
+            
+            latency_ms = (time.perf_counter() - start) * 1000
+            result.latencies_ms.append(latency_ms)
+            
+            # Compare with reference
+            if reference_outputs and img_idx in reference_outputs:
+                ref_outputs = reference_outputs[img_idx]
+                for out, ref_out in zip(outputs, ref_outputs):
+                    metrics = compare_outputs(out, ref_out)
+                    all_comparison_metrics.append(metrics)
+            
+            if (i + 1) % 5 == 0:
+                print(f"  Completed {i+1}/{num_requests}")
+        
+        # Aggregate comparison metrics
+        if all_comparison_metrics:
+            result.output_comparison = aggregate_comparison_metrics(all_comparison_metrics)
+        
+        embedded.stop()
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # Print results
+    print(f"\nResults:")
+    print(f"  Mean latency: {result.mean_latency_ms:.2f} ms")
+    print(f"  P50 latency:  {result.p50_latency_ms:.2f} ms")
+    print(f"  P99 latency:  {result.p99_latency_ms:.2f} ms")
+    print(f"  Throughput:   {result.throughput_rps:.2f} RPS")
+    if result.output_comparison:
+        print(f"  Output Comparison (vs baseline):")
+        print(f"    Boxes MSE:     {result.output_comparison.boxes_mse:.6f}")
+        print(f"    Scores MSE:    {result.output_comparison.scores_mse:.6f}")
+        print(f"    Labels Acc:    {result.output_comparison.labels_accuracy:.4f}")
+        print(f"    Mean IoU:      {result.output_comparison.iou_mean:.4f}")
+    
+    return result
+
+
 def generate_reference_outputs(
     device: str, 
     images: List[bytes]
@@ -499,6 +601,26 @@ def main():
             num_requests=20,
         )
         results.append(result)
+    
+    # Run TorchServe embedded benchmarks
+    print("\n" + "=" * 60)
+    print("TorchServe Embedded Benchmarks")
+    print("=" * 60)
+    
+    torchserve_optimizations = ["baseline", "vmap_backbone"]
+    for optimization in torchserve_optimizations:
+        try:
+            result = run_torchserve_benchmark(
+                optimization=optimization,
+                device=device,
+                images=images,
+                reference_outputs=reference_outputs,
+                num_warmup=5,
+                num_requests=20,
+            )
+            results.append(result)
+        except Exception as e:
+            print(f"TorchServe {optimization} benchmark failed: {e}")
     
     # Generate report
     output_dir = Path(__file__).parent.parent / "outputs" / "ablation"

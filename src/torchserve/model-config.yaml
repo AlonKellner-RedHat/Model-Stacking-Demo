@@ -1,0 +1,22 @@
+# Model-specific configuration for TorchServe handler
+# This file is packaged into the .mar archive and read by the handler
+
+# Optimization configuration
+# Options: baseline | compile | vmap_backbone | grouped_super_model
+optimization: baseline
+
+# Device selection
+# Options: auto | cpu | cuda | mps
+# "auto" will select cuda > mps > cpu based on availability
+device: auto
+
+# Model format (for future extensibility)
+# Options: eager | torchscript | onnx | tensorrt
+# Currently only "eager" is supported
+model_format: eager
+
+# Additional settings (reserved for future use)
+# compile_backend: inductor
+# compile_mode: default
+# mixed_precision: false
+# dtype: float16
