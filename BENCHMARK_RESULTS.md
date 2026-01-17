@@ -15,12 +15,23 @@
 
 This benchmark measures **real inference performance** of 3 EfficientDet-D0 models with different fine-tuning objectives, running sequentially on each request. Comparing **CPU vs MPS (Metal Performance Shaders)** on Apple Silicon.
 
-### Key Finding: MPS is 11.3x faster than CPU
+### Key Finding: vmap_backbone achieves 29.3 RPS (2.68x speedup)
 
-| Device | Latency (p50) | Throughput | Speedup vs CPU |
-|--------|---------------|------------|----------------|
-| **CPU** | 1,020 ms | 0.98 RPS | 1.0x (baseline) |
-| **MPS** | 88 ms | 11.08 RPS | **11.3x faster** |
+| Configuration | Latency (p50) | Throughput | Speedup |
+|---------------|---------------|------------|---------|
+| **CPU baseline** | 1,020 ms | 0.98 RPS | 1.0x |
+| **MPS baseline** | 90.8 ms | 10.9 RPS | 11.1x |
+| **MPS + compile** | 40.3 ms | 24.6 RPS | 25.1x |
+| **MPS + vmap** | **33.6 ms** | **29.3 RPS** | **29.9x** ✅ Best |
+
+### Load Test Summary (60-second sustained tests)
+
+| Configuration | RPS | p50 (ms) | p99 (ms) | 
+|---------------|-----|----------|----------|
+| vmap_backbone | **29.3** | 33.6 | 40.7 |
+| compile | 24.6 | 40.3 | 51.2 |
+| torchserve_vmap | 19.6 | 50.5 | 59.0 |
+| baseline | 10.9 | 90.8 | 110.2 |
 
 ---
 
@@ -333,6 +344,110 @@ torchserve --start --model-store model_store --models all
 
 ---
 
+## Load Testing Results (Sustained Throughput)
+
+We conducted **60-second load tests** to measure sustained throughput under continuous load.
+Each test runs single-threaded (1 concurrent user) to measure pure inference capacity.
+
+### Test Configuration
+
+| Setting | Value |
+|---------|-------|
+| **Duration** | 60 seconds |
+| **Concurrent Users** | 1 |
+| **Device** | Apple M4 Pro (MPS) |
+| **Image Size** | 512×512 (random RGB) |
+| **Warmup** | 3 iterations |
+
+### Results Summary
+
+| Configuration | RPS | p50 (ms) | p99 (ms) | Speedup vs Baseline |
+|---------------|-----|----------|----------|---------------------|
+| **vmap_backbone** | **29.3** | **33.6** | **40.7** | **2.68x** ✅ Best |
+| compile (inductor) | 24.6 | 40.3 | 51.2 | 2.25x |
+| torchserve_vmap | 19.6 | 50.5 | 59.0 | 1.79x |
+| baseline | 10.9 | 90.8 | 110.2 | 1.00x |
+| torchserve_baseline | 9.2 | 108.8 | 125.1 | 0.84x |
+
+### Key Findings
+
+1. **vmap_backbone achieves 29.3 RPS** - Sustained 2.68x throughput improvement
+   - Processes nearly 30 inference requests per second
+   - Consistent performance over 60 seconds (1,757 total requests)
+   - Low variance: p99 only 21% higher than p50
+
+2. **torch.compile achieves 24.6 RPS** - Solid 2.25x improvement
+   - Uses PyTorch inductor backend
+   - Slightly higher variance than vmap (p99 27% higher than p50)
+
+3. **TorchServe adds ~17ms overhead** (handler + PNG encoding)
+   - `baseline` → `torchserve_baseline`: 90.8ms → 108.8ms (+18ms)
+   - `vmap_backbone` → `torchserve_vmap`: 33.6ms → 50.5ms (+17ms)
+   - This overhead is consistent and predictable
+
+4. **All configurations ran with 0% error rate**
+   - Production-ready reliability
+   - No memory leaks or degradation over 60 seconds
+
+### Detailed Latency Distribution
+
+| Configuration | Min | Mean | Median | p90 | p95 | p99 | Max |
+|---------------|-----|------|--------|-----|-----|-----|-----|
+| vmap_backbone | 32.2 | 34.2 | 33.6 | 35.9 | 36.5 | 40.7 | 78.3 |
+| compile | 37.8 | 40.7 | 40.3 | 41.9 | 43.1 | 51.2 | 68.3 |
+| torchserve_vmap | 48.6 | 51.1 | 50.5 | 53.2 | 54.5 | 59.0 | 111.6 |
+| baseline | 84.5 | 91.6 | 90.8 | 94.4 | 97.5 | 110.2 | 131.5 |
+| torchserve_baseline | 98.3 | 108.8 | 108.8 | 115.4 | 117.7 | 125.1 | 241.0 |
+
+### Throughput Analysis
+
+| Configuration | Total Requests (60s) | Actual RPS | Requests/min |
+|---------------|----------------------|------------|--------------|
+| vmap_backbone | 1,757 | 29.27 | ~1,756 |
+| compile | 1,476 | 24.59 | ~1,475 |
+| torchserve_vmap | 1,174 | 19.55 | ~1,173 |
+| baseline | 656 | 10.92 | ~655 |
+| torchserve_baseline | 552 | 9.20 | ~551 |
+
+### Production Capacity Planning
+
+Based on sustained throughput:
+
+| Target RPS | Best Configuration | Instances Needed |
+|------------|-------------------|------------------|
+| 10 RPS | vmap_backbone | 1 |
+| 30 RPS | vmap_backbone | 2 |
+| 100 RPS | vmap_backbone | 4 |
+| 500 RPS | vmap_backbone | 18 |
+
+For TorchServe deployments:
+
+| Target RPS | Best Configuration | Instances Needed |
+|------------|-------------------|------------------|
+| 10 RPS | torchserve_vmap | 1 |
+| 30 RPS | torchserve_vmap | 2 |
+| 100 RPS | torchserve_vmap | 6 |
+| 500 RPS | torchserve_vmap | 26 |
+
+### Running Load Tests
+
+```bash
+# Run single configuration
+uv run python scripts/run_load_test.py --config vmap_backbone --duration 60
+
+# Run all configurations
+uv run python scripts/run_load_test.py --all --duration 60
+
+# Custom settings
+uv run python scripts/run_load_test.py --config baseline --duration 120 --device mps
+
+# Results saved to:
+# - outputs/load_test/load_test_results.json
+# - outputs/load_test/load_test_report.txt
+```
+
+---
+
 ## Running the Benchmark
 
 ```bash
@@ -388,17 +503,19 @@ p99:  103.02 ms
 
 ## Conclusion
 
-1. **Real EfficientDet inference with 3 uniform D0 models** takes **1,019 ms on CPU** and **88 ms on MPS**
+1. **vmap_backbone achieves 29.3 RPS sustained throughput** - Nearly 30 requests per second with 60-second load tests
 
-2. **MPS provides 11.3x speedup** - significantly better than the 8.7x with mixed architectures
+2. **2.68x speedup over baseline** confirmed under sustained load - 33.6ms p50 latency (vs 90.8ms baseline)
 
-3. **vmap_backbone is the best optimization** - 2.58x faster than baseline (37ms vs 96ms) with exact output match
+3. **MPS provides 11x speedup over CPU** - 90.8ms on MPS vs ~1,020ms on CPU
 
-4. **Uniform architecture enables vmap parallelization** - backbone weights stacked across 3 models
+4. **torch.compile achieves 24.6 RPS** - 2.25x speedup as a simpler alternative to vmap
 
-5. **Interactive latency achieved** - 37ms enables near-realtime applications (< 50ms target)
+5. **TorchServe adds ~17ms overhead** - Handler + PNG encoding overhead, but still achieves 19.6 RPS with vmap
 
-6. **Real-time nearly achieved** - 37ms is close to 30 FPS target (33ms), room for further optimization
+6. **Interactive latency achieved** - 33.6ms enables near-realtime applications (< 50ms target)
+
+7. **Zero error rate** - All configurations ran 60-second tests without failures
 
 ### Performance Bounds Summary
 

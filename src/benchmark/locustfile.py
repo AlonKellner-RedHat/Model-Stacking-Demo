@@ -1,13 +1,27 @@
-"""Locust load test definition for inference benchmarking."""
+"""Locust load test definition for inference benchmarking.
+
+This module provides Locust user classes for load testing:
+
+1. HttpUser classes (for server mode):
+   - InferenceBenchmarkUser: Tests a single implementation
+   - ComparativeUser: Tests both baseline and invalid
+
+2. User classes (for embedded mode):
+   - EmbeddedInferenceUser: Direct function calls (no HTTP)
+   - TorchServeEmbeddedUser: TorchServe handler calls
+
+The embedded mode users are used by scripts/run_load_test.py for
+measuring pure inference throughput without HTTP overhead.
+"""
 
 import json
 import os
 import random
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from locust import HttpUser, between, events, task
+from locust import HttpUser, User, between, events, task
 from locust.env import Environment
 
 
@@ -244,3 +258,124 @@ def on_test_stop(environment: Environment, **kwargs):
     print("=" * 60)
     print("Inference Benchmark Load Test Complete")
     print("=" * 60)
+
+
+# ============================================================================
+# Embedded Mode User Classes (for direct inference testing)
+# ============================================================================
+
+class EmbeddedInferenceUser(User):
+    """Locust user for embedded (direct) inference testing.
+    
+    This user calls the inference implementation directly, bypassing
+    HTTP overhead to measure pure inference performance.
+    
+    Used by scripts/run_load_test.py for embedded mode testing.
+    
+    Attributes (set dynamically before test):
+        impl: The model implementation to use
+        test_image: PIL Image for inference
+        config_name: Configuration name for reporting
+    """
+    
+    # No wait between tasks - measure max throughput
+    wait_time: Callable = lambda self: 0
+    
+    # Will be set dynamically by the test runner
+    impl: Optional[Any] = None
+    test_image: Optional[Any] = None
+    config_name: str = "embedded"
+    
+    def on_start(self):
+        """Initialize user."""
+        pass  # Implementation is shared across all users
+    
+    @task
+    def infer(self):
+        """Run inference on test image."""
+        if self.impl is None:
+            return
+        
+        request_meta = {
+            "request_type": "INFER",
+            "name": f"/infer/{self.config_name}",
+            "start_time": time.time(),
+            "response_length": 0,
+            "response": None,
+            "context": {},
+            "exception": None,
+        }
+        
+        start_perf_counter = time.perf_counter()
+        
+        try:
+            # Run inference
+            outputs = self.impl.predict(self.test_image)
+            
+            response_time = (time.perf_counter() - start_perf_counter) * 1000
+            request_meta["response_time"] = response_time
+            request_meta["response_length"] = len(outputs)
+            
+        except Exception as e:
+            response_time = (time.perf_counter() - start_perf_counter) * 1000
+            request_meta["response_time"] = response_time
+            request_meta["exception"] = e
+        
+        # Fire request event for stats collection
+        events.request.fire(**request_meta)
+
+
+class TorchServeEmbeddedUser(User):
+    """Locust user for TorchServe embedded mode testing.
+    
+    Tests the TorchServe handler pipeline directly without HTTP,
+    measuring handler overhead vs direct model inference.
+    
+    Attributes (set dynamically before test):
+        embedded: EmbeddedTorchServe instance
+        test_image: PIL Image for inference  
+        config_name: Configuration name for reporting
+    """
+    
+    wait_time: Callable = lambda self: 0
+    
+    embedded: Optional[Any] = None
+    test_image: Optional[Any] = None
+    config_name: str = "torchserve"
+    
+    def on_start(self):
+        """Initialize user."""
+        pass
+    
+    @task
+    def infer(self):
+        """Run inference through TorchServe handler."""
+        if self.embedded is None:
+            return
+        
+        request_meta = {
+            "request_type": "INFER",
+            "name": f"/infer/{self.config_name}",
+            "start_time": time.time(),
+            "response_length": 0,
+            "response": None,
+            "context": {},
+            "exception": None,
+        }
+        
+        start_perf_counter = time.perf_counter()
+        
+        try:
+            # Run inference through handler
+            result = self.embedded.infer(self.test_image)
+            
+            response_time = (time.perf_counter() - start_perf_counter) * 1000
+            request_meta["response_time"] = response_time
+            request_meta["response_length"] = len(result.get("detections", []))
+            
+        except Exception as e:
+            response_time = (time.perf_counter() - start_perf_counter) * 1000
+            request_meta["response_time"] = response_time
+            request_meta["exception"] = e
+        
+        events.request.fire(**request_meta)
