@@ -2,7 +2,7 @@
 ABLATION STUDY: OPTIMIZATION CONFIGURATIONS
 ====================================================================================================
 
-Generated: 2026-01-17 18:53:12
+Generated: 2026-01-17 18:59:13
 
 ----------------------------------------------------------------------------------------------------
 PERFORMANCE SUMMARY
@@ -10,18 +10,18 @@ PERFORMANCE SUMMARY
 
 Config                    Device   Mean (ms)    P50 (ms)     P99 (ms)     RPS       
 ----------------------------------------------------------------------------------------------------
-vmap_backbone             mps      37.37        37.45        38.90        26.76      (2.69x)
-vmap+fp16                 mps      38.04        36.63        54.57        26.29      (2.64x)
-torchserve_vmap_backbone  mps      41.11        41.23        42.42        24.33      (2.44x)
-compile_default           mps      42.56        42.67        44.25        23.50      (2.36x)
-compile_reduce_overhead   mps      44.52        43.58        57.48        22.46      (2.26x)
-baseline                  mps      100.48       96.95        148.28       9.95       (1.00x)
-grouped_super_model       mps      101.15       100.81       106.37       9.89       (0.99x)
-torchserve_baseline       mps      103.40       98.95        136.89       9.67       (0.97x)
-grouped+compile           mps      104.51       95.72        185.26       9.57       (0.96x)
-fp16                      mps      596.46       595.08       669.56       1.68       (0.17x)
-compile+fp16              mps      620.85       621.10       645.89       1.61       (0.16x)
-compile_ro+fp16           mps      640.34       639.27       672.57       1.56       (0.16x)
+vmap+fp16                 mps      36.34        36.40        37.68        27.51      (2.37x)
+vmap_backbone             mps      37.56        37.69        38.63        26.62      (2.29x)
+compile_default           mps      40.14        39.92        43.75        24.91      (2.14x)
+compile_reduce_overhead   mps      40.69        40.70        42.78        24.57      (2.11x)
+torchserve_vmap_backbone  mps      53.15        53.28        54.75        18.82      (1.62x)
+baseline                  mps      85.97        85.78        89.97        11.63      (1.00x)
+grouped+compile           mps      96.79        96.83        103.63       10.33      (0.89x)
+grouped_super_model       mps      97.29        97.11        100.76       10.28      (0.88x)
+torchserve_baseline       mps      110.43       109.97       113.77       9.06       (0.78x)
+fp16                      mps      552.64       573.06       608.16       1.81       (0.16x)
+compile+fp16              mps      571.00       565.97       649.04       1.75       (0.15x)
+compile_ro+fp16           mps      608.12       601.65       699.68       1.64       (0.14x)
 
 ----------------------------------------------------------------------------------------------------
 OUTPUT DIFFERENCE (vs Baseline Reference)
@@ -29,15 +29,15 @@ OUTPUT DIFFERENCE (vs Baseline Reference)
 
 Config                    Boxes MSE       Scores MSE      Labels Acc      Mean IoU       
 ----------------------------------------------------------------------------------------------------
-vmap_backbone             0.000000        0.000000        1.0000          1.0000         
 vmap+fp16                 0.007307        0.000000        1.0000          0.9995         
-torchserve_vmap_backbone  2.152254        0.000023        0.7833          0.7791         
+vmap_backbone             0.000000        0.000000        1.0000          1.0000         
 compile_default           0.000000        0.000000        1.0000          1.0000         
 compile_reduce_overhead   0.000000        0.000000        1.0000          1.0000         
+torchserve_vmap_backbone  0.000000        0.000000        1.0000          1.0000         
 baseline                  0.000000        0.000000        1.0000          1.0000         
-grouped_super_model       0.000000        0.000000        1.0000          1.0000         
-torchserve_baseline       2.152252        0.000023        0.7833          0.7791         
 grouped+compile           0.000000        0.000000        1.0000          1.0000         
+grouped_super_model       0.000000        0.000000        1.0000          1.0000         
+torchserve_baseline       0.000000        0.000000        1.0000          1.0000         
 fp16                      0.006952        0.000001        1.0000          0.9995         
 compile+fp16              0.006952        0.000001        1.0000          0.9995         
 compile_ro+fp16           0.006952        0.000001        1.0000          0.9995         
@@ -49,24 +49,24 @@ Note: Baseline compared to itself should have 0 MSE and 1.0 accuracy/IoU
 SPEEDUP vs BASELINE
 ----------------------------------------------------------------------------------------------------
 
-  vmap_backbone: 2.69x faster (62.8% improvement) [exact match]
-  vmap+fp16: 2.64x faster (62.1% improvement) [exact match]
-  torchserve_vmap_backbone: 2.44x faster (59.1% improvement) [significant diff!]
-  compile_default: 2.36x faster (57.6% improvement) [exact match]
-  compile_reduce_overhead: 2.26x faster (55.7% improvement) [exact match]
-  grouped_super_model: 0.99x faster (-0.7% improvement) [exact match]
-  torchserve_baseline: 0.97x faster (-2.9% improvement) [significant diff!]
-  grouped+compile: 0.96x faster (-4.0% improvement) [exact match]
-  fp16: 0.17x faster (-493.6% improvement) [exact match]
-  compile+fp16: 0.16x faster (-517.9% improvement) [exact match]
-  compile_ro+fp16: 0.16x faster (-537.3% improvement) [exact match]
+  vmap+fp16: 2.37x faster (57.7% improvement) [exact match]
+  vmap_backbone: 2.29x faster (56.3% improvement) [exact match]
+  compile_default: 2.14x faster (53.3% improvement) [exact match]
+  compile_reduce_overhead: 2.11x faster (52.7% improvement) [exact match]
+  torchserve_vmap_backbone: 1.62x faster (38.2% improvement) [exact match]
+  grouped+compile: 0.89x faster (-12.6% improvement) [exact match]
+  grouped_super_model: 0.88x faster (-13.2% improvement) [exact match]
+  torchserve_baseline: 0.78x faster (-28.5% improvement) [exact match]
+  fp16: 0.16x faster (-542.8% improvement) [exact match]
+  compile+fp16: 0.15x faster (-564.2% improvement) [exact match]
+  compile_ro+fp16: 0.14x faster (-607.4% improvement) [exact match]
 
 ----------------------------------------------------------------------------------------------------
 KEY FINDINGS
 ----------------------------------------------------------------------------------------------------
 
-  Best config (with quality): vmap_backbone
-    Latency: 37.37ms (2.69x faster)
-    Output Quality: IoU=1.0000
+  Best config (with quality): vmap+fp16
+    Latency: 36.34ms (2.37x faster)
+    Output Quality: IoU=0.9995
 
 ====================================================================================================

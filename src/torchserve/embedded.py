@@ -139,12 +139,13 @@ class EmbeddedTorchServe:
             raise RuntimeError("Handler not initialized. Call start() first.")
         
         # Convert image to bytes (matching TorchServe request format)
+        # Use PNG (lossless) to ensure exact output match with direct inference
         if isinstance(image, (str, Path)):
             image = Image.open(image)
         
         if isinstance(image, Image.Image):
             buffer = io.BytesIO()
-            image.save(buffer, format="JPEG")
+            image.save(buffer, format="PNG")  # PNG is lossless
             image_bytes = buffer.getvalue()
         else:
             image_bytes = image
@@ -210,9 +211,9 @@ class EmbeddedTorchServe:
         return outputs[0] if outputs else []
     
     def _image_to_bytes(self, image: Image.Image) -> bytes:
-        """Convert PIL Image to JPEG bytes."""
+        """Convert PIL Image to PNG bytes (lossless)."""
         buffer = io.BytesIO()
-        image.save(buffer, format="JPEG")
+        image.save(buffer, format="PNG")
         return buffer.getvalue()
     
     @property
