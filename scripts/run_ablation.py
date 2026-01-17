@@ -131,6 +131,12 @@ def get_ablation_configs() -> Dict[str, OptimizationConfig]:
             dtype=torch.float16,
         ),
         
+        # Vmap backbone optimization (includes compile internally)
+        # Parallelizes backbone+FPN+box_net across models using torch.vmap
+        "vmap_backbone": OptimizationConfig(
+            vmap_backbone_enabled=True,
+        ),
+        
         # Combinations
         "compile+fp16": OptimizationConfig(
             compile_enabled=True,
@@ -143,6 +149,12 @@ def get_ablation_configs() -> Dict[str, OptimizationConfig]:
             compile_enabled=True,
             compile_backend="inductor",
             compile_mode="reduce-overhead",
+            mixed_precision_enabled=True,
+            dtype=torch.float16,
+        ),
+        # Vmap with FP16 (likely slow on MPS due to FP16 overhead)
+        "vmap+fp16": OptimizationConfig(
+            vmap_backbone_enabled=True,
             mixed_precision_enabled=True,
             dtype=torch.float16,
         ),

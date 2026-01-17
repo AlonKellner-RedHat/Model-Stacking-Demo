@@ -91,6 +91,7 @@ class OptimizationStack:
     def __init__(self, config: OptimizationConfig):
         self.config = config
         self.optimizations: List[Optimization] = []
+        self._vmap_optimization: Optional[Any] = None  # Special handling for vmap
         self._build_stack()
     
     def _build_stack(self) -> None:
@@ -106,7 +107,9 @@ class OptimizationStack:
                 MixedPrecisionOptimization(dtype=self.config.dtype)
             )
         
-        if self.config.compile_enabled:
+        # vmap_backbone internally handles compile, so skip separate compile
+        # when vmap is enabled
+        if self.config.compile_enabled and not self.config.vmap_backbone_enabled:
             self.optimizations.append(
                 TorchCompileOptimization(
                     backend=self.config.compile_backend,
@@ -116,7 +119,11 @@ class OptimizationStack:
             )
         
         if self.config.vmap_backbone_enabled:
-            self.optimizations.append(VmapBackboneOptimization())
+            # Store vmap optimization separately for special handling
+            self._vmap_optimization = VmapBackboneOptimization(
+                compile_vmapped=True  # Always compile for best performance
+            )
+            self.optimizations.append(self._vmap_optimization)
         
         if self.config.batched_inference_enabled:
             self.optimizations.append(
@@ -128,6 +135,16 @@ class OptimizationStack:
         for opt in self.optimizations:
             models = opt.apply(models, device)
         return models
+    
+    @property
+    def uses_vmap_forward(self) -> bool:
+        """Check if vmap optimization is enabled and should override forward."""
+        return self._vmap_optimization is not None
+    
+    @property
+    def vmap_optimization(self) -> Optional[Any]:
+        """Get the vmap optimization instance if enabled."""
+        return self._vmap_optimization
     
     def forward(
         self, 

@@ -144,23 +144,23 @@ Previous benchmarks used D0, D1, D2 (different architectures, different input si
 
 ### Latency Requirements
 
-| Use Case | Latency Target | CPU | MPS | MPS + compile |
-|----------|----------------|-----|-----|---------------|
-| Real-time video (30 FPS) | < 33 ms | ❌ | ❌ | ⚠️ (need vmap) |
-| Interactive (< 50 ms) | < 50 ms | ❌ | ❌ | ✅ (43 ms) |
-| Interactive (< 100 ms) | < 100 ms | ❌ | ✅ (88 ms) | ✅ |
-| Near-realtime (< 200 ms) | < 200 ms | ❌ | ✅ | ✅ |
-| Batch processing (< 2s) | < 2,000 ms | ✅ | ✅ | ✅ |
+| Use Case | Latency Target | CPU | MPS | MPS + compile | MPS + vmap |
+|----------|----------------|-----|-----|---------------|------------|
+| Real-time video (30 FPS) | < 33 ms | ❌ | ❌ | ❌ | ⚠️ (37 ms, close!) |
+| Interactive (< 50 ms) | < 50 ms | ❌ | ❌ | ✅ (43 ms) | ✅ (37 ms) |
+| Interactive (< 100 ms) | < 100 ms | ❌ | ✅ (88 ms) | ✅ | ✅ |
+| Near-realtime (< 200 ms) | < 200 ms | ❌ | ✅ | ✅ | ✅ |
+| Batch processing (< 2s) | < 2,000 ms | ✅ | ✅ | ✅ | ✅ |
 
 ### Throughput Requirements
 
-| Requests/sec | CPU | MPS | MPS + compile |
-|--------------|-----|-----|---------------|
-| < 1 RPS | ✅ (0.98) | ✅ | ✅ |
-| 1-10 RPS | ❌ | ✅ (11.08) | ✅ |
-| 10-20 RPS | ❌ | ⚠️ | ✅ (23 RPS) |
-| 20-30 RPS | ❌ | ❌ | ⚠️ (need batching) |
-| > 30 RPS | ❌ | ❌ | ❌ (need CUDA) |
+| Requests/sec | CPU | MPS | MPS + compile | MPS + vmap |
+|--------------|-----|-----|---------------|------------|
+| < 1 RPS | ✅ (0.98) | ✅ | ✅ | ✅ |
+| 1-10 RPS | ❌ | ✅ (11.08) | ✅ | ✅ |
+| 10-20 RPS | ❌ | ⚠️ | ✅ (23 RPS) | ✅ (27 RPS) |
+| 20-30 RPS | ❌ | ❌ | ✅ | ✅ (27 RPS) |
+| > 30 RPS | ❌ | ❌ | ❌ | ⚠️ (need CUDA/batching) |
 
 ---
 
@@ -170,37 +170,56 @@ We tested composable optimizations to find the best configuration:
 
 ### Results Summary (MPS)
 
-| Configuration | Latency (ms) | Throughput | Speedup | Status |
-|---------------|--------------|------------|---------|--------|
-| **torch.compile (reduce-overhead)** | 43.2 | 23.1 RPS | **2.13x** | ✅ Best |
-| **torch.compile (default)** | 43.5 | 23.0 RPS | **2.11x** | ✅ Excellent |
-| Baseline (no optimizations) | 92.0 | 10.9 RPS | 1.00x | Reference |
-| FP16 only | 581.2 | 1.7 RPS | 0.16x | ❌ Slower |
-| compile + FP16 | 590.5 | 1.7 RPS | 0.16x | ❌ Slower |
+| Configuration | Latency (ms) | Throughput | Speedup | Output Quality | Status |
+|---------------|--------------|------------|---------|----------------|--------|
+| **vmap_backbone** | **37.3** | **26.8 RPS** | **2.58x** | IoU=1.0 (exact) | ✅ **Best** |
+| vmap + FP16 | 38.1 | 26.3 RPS | 2.53x | IoU=0.9995 | ✅ Excellent |
+| torch.compile (default) | 43.0 | 23.3 RPS | 2.24x | IoU=1.0 (exact) | ✅ Great |
+| torch.compile (reduce-overhead) | 44.3 | 22.6 RPS | 2.18x | IoU=1.0 (exact) | ✅ Great |
+| Baseline (no optimizations) | 96.4 | 10.4 RPS | 1.00x | Reference | Reference |
+| FP16 only | 613.2 | 1.6 RPS | 0.16x | IoU=0.9995 | ❌ Slower |
+| compile + FP16 | 628.3 | 1.6 RPS | 0.15x | IoU=0.9995 | ❌ Slower |
 
 ### Key Findings
 
-1. **torch.compile provides 2.1x speedup** 
-   - Reduces latency from 92ms to 43ms
-   - Uses PyTorch's inductor backend for kernel optimization
-   - Both "default" and "reduce-overhead" modes perform similarly
+1. **vmap_backbone provides 2.58x speedup** (NEW BEST!)
+   - Reduces latency from 96ms to 37ms
+   - Uses `torch.vmap` to parallelize backbone+FPN+box_net across 3 models
+   - Internally applies `torch.compile` for optimal kernel fusion
+   - **Exact output match** (MSE=0, IoU=1.0)
 
-2. **FP16 is counterproductive on MPS**
-   - 6x slower than FP32 (581ms vs 92ms)
+2. **torch.compile provides 2.2x speedup**
+   - Reduces latency from 96ms to 43ms
+   - Uses PyTorch's inductor backend for kernel optimization
+   - vmap_backbone is 15% faster than compile alone
+
+3. **FP16 is counterproductive on MPS**
+   - 6x slower than FP32 (613ms vs 96ms)
    - MPS has significant FP16 conversion overhead
    - Not recommended for Apple Silicon
 
-3. **Best configuration: torch.compile only**
-   - 43ms latency, 23 RPS throughput
+4. **Best configuration: vmap_backbone**
+   - 37ms latency, 27 RPS throughput
    - Enables interactive applications (< 50ms target)
+   - Exact output match with baseline
+
+### Output Quality Comparison
+
+| Configuration | Boxes MSE | Scores MSE | Labels Acc | Mean IoU |
+|---------------|-----------|------------|------------|----------|
+| vmap_backbone | 0.000000 | 0.000000 | 1.0000 | 1.0000 |
+| torch.compile | 0.000000 | 0.000000 | 1.0000 | 1.0000 |
+| baseline | 0.000000 | 0.000000 | 1.0000 | 1.0000 |
+| FP16 variants | 0.007 | 0.000001 | 1.0000 | 0.9995 |
 
 ### Updated Performance After Optimization
 
-| Device | Config | Latency (p50) | Throughput | vs Baseline |
-|--------|--------|---------------|------------|-------------|
+| Device | Config | Latency (p50) | Throughput | vs CPU Baseline |
+|--------|--------|---------------|------------|-----------------|
 | CPU | baseline | 1,020 ms | 0.98 RPS | 1.0x |
 | MPS | baseline | 88 ms | 11.08 RPS | 11.6x |
-| **MPS** | **torch.compile** | **43 ms** | **23 RPS** | **23.7x** |
+| MPS | torch.compile | 43 ms | 23 RPS | 23.7x |
+| **MPS** | **vmap_backbone** | **37 ms** | **27 RPS** | **27.6x** |
 
 ---
 
@@ -216,11 +235,18 @@ Based on ablation study results:
 - **MPS + compile**: 43 ms → **2.1x additional improvement**
 - **Total vs CPU**: **23.7x faster**
 
-### Phase 3: Backbone Stacking with vmap (Future)
-Since all 3 models share the same backbone architecture, we can:
-- Stack backbone weights: `[3, ...weight_shape...]`
-- Use `torch.vmap` for parallel backbone computation
-- Expected: **1.5-2x improvement** → target ~20-30 ms on MPS
+### Phase 3: Backbone Stacking with vmap ✅ (COMPLETED)
+All 3 models share the same backbone architecture (EfficientNet-B0 + BiFPN), enabling:
+- Stack backbone weights using `torch.func.stack_module_state`: `[3, ...weight_shape...]`
+- Use `torch.vmap` with `torch.func.functional_call` for parallel computation
+- **Actual result: 2.58x speedup** (37ms vs 96ms baseline)
+- **Exact output match** (IoU=1.0, MSE=0)
+
+**How it works:**
+1. Backbone, FPN, and box_net weights are stacked across 3 models
+2. `torch.vmap` vectorizes the forward pass across the model dimension
+3. Class heads run sequentially (different output shapes: 90, 7, 20 classes)
+4. `torch.compile` is applied internally for optimal kernel fusion
 
 ### Phase 4: Full Fusion (Future)
 - Grouped convolutions for parallel class heads
@@ -292,19 +318,21 @@ p99:  103.02 ms
 
 2. **MPS provides 11.3x speedup** - significantly better than the 8.7x with mixed architectures
 
-3. **Uniform architecture unlocks optimization potential** - backbone weights can now be stacked for `vmap`
+3. **vmap_backbone is the best optimization** - 2.58x faster than baseline (37ms vs 96ms) with exact output match
 
-4. **MPS achieves interactive latency** - 88 ms enables near-realtime applications
+4. **Uniform architecture enables vmap parallelization** - backbone weights stacked across 3 models
 
-5. **Real-time still requires optimization** - need vmap/fusion to achieve 30 FPS (33 ms)
+5. **Interactive latency achieved** - 37ms enables near-realtime applications (< 50ms target)
+
+6. **Real-time nearly achieved** - 37ms is close to 30 FPS target (33ms), room for further optimization
 
 ### Performance Bounds Summary
 
-| Bound | CPU | MPS |
-|-------|-----|-----|
-| **Upper (Real Model p50)** | 1,020 ms | 88 ms |
-| **Lower (Invalid p50)** | 0.01 ms | 0.01 ms |
-| **Optimization Gap** | 102,000x | 8,800x |
+| Bound | CPU | MPS | MPS + vmap |
+|-------|-----|-----|------------|
+| **Upper (Real Model p50)** | 1,020 ms | 88 ms | 37 ms |
+| **Lower (Invalid p50)** | 0.01 ms | 0.01 ms | 0.01 ms |
+| **Optimization Gap** | 102,000x | 8,800x | 3,700x |
 
 ### Model Configuration
 
