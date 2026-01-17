@@ -39,6 +39,10 @@ ENV/
 data/coco/
 data/roboflow/
 
+# Model checkpoints (large files, generated locally)
+checkpoints/
+*.pth
+
 # Outputs
 outputs/reference/
 outputs/benchmark/
