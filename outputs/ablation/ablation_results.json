@@ -3,60 +3,102 @@
     "config_name": "baseline",
     "config": "none",
     "device": "mps",
-    "mean_latency_ms": 91.96705200038195,
-    "p50_latency_ms": 91.01566650042514,
-    "p99_latency_ms": 97.39332380979249,
-    "throughput_rps": 10.87345933406506,
-    "num_requests": 20
+    "mean_latency_ms": 92.15338964968396,
+    "p50_latency_ms": 90.86964599919156,
+    "p99_latency_ms": 109.21000951850145,
+    "throughput_rps": 10.851472786855101,
+    "num_requests": 20,
+    "output_comparison": {
+      "boxes_mse": 0.0,
+      "scores_mse": 0.0,
+      "labels_accuracy": 1.0,
+      "iou_mean": 0.9999999954162172,
+      "num_detections_diff": 0
+    }
   },
   {
     "config_name": "compile_default",
     "config": "compile(inductor)",
     "device": "mps",
-    "mean_latency_ms": 43.50599360004708,
-    "p50_latency_ms": 43.251208000583574,
-    "p99_latency_ms": 47.36327377113412,
-    "throughput_rps": 22.985338737302577,
-    "num_requests": 20
+    "mean_latency_ms": 42.455004150178866,
+    "p50_latency_ms": 42.59006249958475,
+    "p99_latency_ms": 44.43317126986585,
+    "throughput_rps": 23.554349363920316,
+    "num_requests": 20,
+    "output_comparison": {
+      "boxes_mse": 1.8626451492309571e-10,
+      "scores_mse": 8.013034793169793e-15,
+      "labels_accuracy": 1.0,
+      "iou_mean": 0.9999999548026838,
+      "num_detections_diff": 0
+    }
   },
   {
     "config_name": "compile_reduce_overhead",
     "config": "compile(inductor)",
     "device": "mps",
-    "mean_latency_ms": 43.237862450132525,
-    "p50_latency_ms": 43.475020499499806,
-    "p99_latency_ms": 45.245038810389815,
-    "throughput_rps": 23.12787782128057,
-    "num_requests": 20
+    "mean_latency_ms": 43.0805582001085,
+    "p50_latency_ms": 43.1100414998582,
+    "p99_latency_ms": 45.08920994012442,
+    "throughput_rps": 23.21232690057116,
+    "num_requests": 20,
+    "output_comparison": {
+      "boxes_mse": 1.8626451492309571e-10,
+      "scores_mse": 8.013034793169793e-15,
+      "labels_accuracy": 1.0,
+      "iou_mean": 0.9999999548026838,
+      "num_detections_diff": 0
+    }
   },
   {
     "config_name": "fp16",
     "config": "mixed_precision(torch.float16)",
     "device": "mps",
-    "mean_latency_ms": 581.1800332999155,
-    "p50_latency_ms": 584.4104999996489,
-    "p99_latency_ms": 609.4046035407155,
-    "throughput_rps": 1.720637225477349,
-    "num_requests": 20
+    "mean_latency_ms": 568.6460751498998,
+    "p50_latency_ms": 565.6516670005658,
+    "p99_latency_ms": 629.937898269327,
+    "throughput_rps": 1.758563091702324,
+    "num_requests": 20,
+    "output_comparison": {
+      "boxes_mse": 0.00695172967389226,
+      "scores_mse": 8.426601046570189e-07,
+      "labels_accuracy": 1.0,
+      "iou_mean": 0.9995491875050568,
+      "num_detections_diff": 0
+    }
   },
   {
     "config_name": "compile+fp16",
     "config": "compile(inductor)+mixed_precision(torch.float16)",
     "device": "mps",
-    "mean_latency_ms": 590.5040187998566,
-    "p50_latency_ms": 594.659708499421,
-    "p99_latency_ms": 666.4578954800527,
-    "throughput_rps": 1.6934685762721906,
-    "num_requests": 20
+    "mean_latency_ms": 573.5126229499656,
+    "p50_latency_ms": 566.2349999993239,
+    "p99_latency_ms": 675.0078397295146,
+    "throughput_rps": 1.7436407848467566,
+    "num_requests": 20,
+    "output_comparison": {
+      "boxes_mse": 0.00695172967389226,
+      "scores_mse": 8.426601046570189e-07,
+      "labels_accuracy": 1.0,
+      "iou_mean": 0.9995491875050568,
+      "num_detections_diff": 0
+    }
   },
   {
     "config_name": "compile_ro+fp16",
     "config": "compile(inductor)+mixed_precision(torch.float16)",
     "device": "mps",
-    "mean_latency_ms": 589.8866687999544,
-    "p50_latency_ms": 594.2063749989757,
-    "p99_latency_ms": 615.835909729758,
-    "throughput_rps": 1.695240887600268,
-    "num_requests": 20
+    "mean_latency_ms": 577.0395207999172,
+    "p50_latency_ms": 573.3045414999651,
+    "p99_latency_ms": 623.6936190403685,
+    "throughput_rps": 1.732983554772395,
+    "num_requests": 20,
+    "output_comparison": {
+      "boxes_mse": 0.00695172967389226,
+      "scores_mse": 8.426601046570189e-07,
+      "labels_accuracy": 1.0,
+      "iou_mean": 0.9995491875050568,
+      "num_detections_diff": 0
+    }
   }
 ]
