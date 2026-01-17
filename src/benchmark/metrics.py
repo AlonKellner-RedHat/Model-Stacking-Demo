@@ -179,11 +179,11 @@ def compare_outputs(
         )
         return torch.cat([t, padding], dim=0)
     
-    # Pad tensors
-    pred_boxes_padded = pad_tensor(pred_boxes, max_len)
-    ref_boxes_padded = pad_tensor(ref_boxes, max_len)
-    pred_scores_padded = pad_tensor(pred_scores, max_len)
-    ref_scores_padded = pad_tensor(ref_scores, max_len)
+    # Pad tensors (ensure float for MSE calculation)
+    pred_boxes_padded = pad_tensor(pred_boxes.float(), max_len)
+    ref_boxes_padded = pad_tensor(ref_boxes.float(), max_len)
+    pred_scores_padded = pad_tensor(pred_scores.float(), max_len)
+    ref_scores_padded = pad_tensor(ref_scores.float(), max_len)
     pred_labels_padded = pad_tensor(pred_labels.float(), max_len).long()
     ref_labels_padded = pad_tensor(ref_labels.float(), max_len).long()
     
