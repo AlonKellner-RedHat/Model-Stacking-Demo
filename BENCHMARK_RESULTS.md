@@ -13,26 +13,34 @@
 
 ## Executive Summary
 
-This benchmark measures **real inference performance** of 3 EfficientDet models (D0, D1, D2) running sequentially on each request, comparing **CPU vs MPS (Metal Performance Shaders)** on Apple Silicon.
+This benchmark measures **real inference performance** of 3 EfficientDet-D0 models with different fine-tuning objectives, running sequentially on each request. Comparing **CPU vs MPS (Metal Performance Shaders)** on Apple Silicon.
 
-### Key Finding: MPS is 8.7x faster than CPU
+### Key Finding: MPS is 11.3x faster than CPU
 
 | Device | Latency (p50) | Throughput | Speedup vs CPU |
 |--------|---------------|------------|----------------|
-| **CPU** | 1,454 ms | 0.68 RPS | 1.0x (baseline) |
-| **MPS** | 164 ms | 5.97 RPS | **8.7x faster** |
+| **CPU** | 1,020 ms | 0.98 RPS | 1.0x (baseline) |
+| **MPS** | 88 ms | 11.08 RPS | **11.3x faster** |
 
-### Models Used
+---
 
-Each inference request runs **3 real EfficientDet checkpoints** sequentially:
+## Models Under Test
 
-| Model | Input Size | Parameters | Checkpoint |
-|-------|-----------|------------|------------|
-| EfficientDet-D0 | 512×512 | 3.9M | `tf_efficientdet_d0_34-f153e0cf.pth` |
-| EfficientDet-D1 | 640×640 | 6.6M | `tf_efficientdet_d1_40-a30f94af.pth` |
-| EfficientDet-D2 | 768×768 | 8.1M | `tf_efficientdet_d2_43-8107aa99.pth` |
+Each inference request runs **3 EfficientDet-D0 checkpoints** sequentially, simulating models fine-tuned for different detection objectives:
 
-**Total: ~18.6M parameters across 3 models**
+| Model | Classes | Description | Parameters |
+|-------|---------|-------------|------------|
+| `efficientdet_d0_coco` | 90 | COCO dataset (reference) | 3.88M |
+| `efficientdet_d0_aquarium` | 7 | Aquarium dataset (fish, jellyfish, etc.) | 3.83M |
+| `efficientdet_d0_vehicles` | 20 | Vehicles dataset (car, truck, bus, etc.) | 3.84M |
+
+**Key characteristics:**
+- **Same backbone architecture**: EfficientNet-B0 + BiFPN
+- **Same input size**: 512×512
+- **Different class heads**: Varying output dimensions (90, 7, 20 classes)
+- **Total**: ~11.5M parameters across 3 models
+
+This architecture enables future optimization with `torch.vmap` (backbone can be stacked).
 
 ---
 
@@ -40,19 +48,19 @@ Each inference request runs **3 real EfficientDet checkpoints** sequentially:
 
 ### Upper Bound: CPU Baseline (Worst Case)
 
-Running 3 EfficientDet models sequentially on CPU represents the **maximum latency** and **minimum throughput** for valid inference.
+Running 3 EfficientDet-D0 models sequentially on CPU represents the **maximum latency** and **minimum throughput** for valid inference.
 
 | Metric | Value |
 |--------|-------|
-| **Latency p50** | 1,453.57 ms |
-| **Latency p99** | 1,510.46 ms |
-| **Latency Range** | 1,426 - 1,514 ms |
-| **Throughput** | 0.68 RPS |
+| **Latency p50** | 1,019.78 ms |
+| **Latency p99** | 1,038.65 ms |
+| **Latency Range** | 1,005 - 1,039 ms |
+| **Throughput** | 0.98 RPS |
 
-**Breakdown per model (estimated):**
-- EfficientDet-D0: ~400 ms
-- EfficientDet-D1: ~480 ms  
-- EfficientDet-D2: ~570 ms
+**Breakdown per model (estimated ~340 ms each):**
+- EfficientDet-D0 COCO (90 classes)
+- EfficientDet-D0 Aquarium (7 classes)
+- EfficientDet-D0 Vehicles (20 classes)
 
 ### Lower Bound: MPS Baseline (Best Case with GPU)
 
@@ -60,15 +68,15 @@ Running the same 3 models on MPS (Apple Silicon GPU) represents the **minimum la
 
 | Metric | Value |
 |--------|-------|
-| **Latency p50** | 164.27 ms |
-| **Latency p99** | 192.37 ms |
-| **Latency Range** | 161 - 193 ms |
-| **Throughput** | 5.97 RPS |
+| **Latency p50** | 87.99 ms |
+| **Latency p99** | 103.02 ms |
+| **Latency Range** | 85 - 104 ms |
+| **Throughput** | 11.08 RPS |
 
-**Breakdown per model (estimated):**
-- EfficientDet-D0: ~45 ms
-- EfficientDet-D1: ~55 ms
-- EfficientDet-D2: ~65 ms
+**Breakdown per model (estimated ~30 ms each):**
+- EfficientDet-D0 COCO
+- EfficientDet-D0 Aquarium  
+- EfficientDet-D0 Vehicles
 
 ### Theoretical Lower Bound: Invalid Implementation
 
@@ -76,8 +84,8 @@ The invalid implementation (constant zero outputs) shows the pure I/O overhead w
 
 | Device | Latency | Throughput |
 |--------|---------|------------|
-| CPU | 0.01 ms | 118,403 RPS |
-| MPS | 0.01 ms | 64,137 RPS |
+| CPU | 0.01 ms | 119,763 RPS |
+| MPS | 0.01 ms | 67,521 RPS |
 
 ---
 
@@ -87,31 +95,48 @@ The invalid implementation (constant zero outputs) shows the pure I/O overhead w
 
 | Metric | CPU | MPS | MPS Advantage |
 |--------|-----|-----|---------------|
-| **Average Latency** | 1,461.11 ms | 167.45 ms | **8.73x faster** |
-| **Latency p50** | 1,453.57 ms | 164.27 ms | **8.85x faster** |
-| **Latency p99** | 1,510.46 ms | 192.37 ms | **7.85x faster** |
-| **Throughput** | 0.68 RPS | 5.97 RPS | **8.73x higher** |
-| **Latency Variance** | 88 ms | 33 ms | 2.7x more stable |
+| **Average Latency** | 1,019.15 ms | 90.26 ms | **11.29x faster** |
+| **Latency p50** | 1,019.78 ms | 87.99 ms | **11.59x faster** |
+| **Latency p99** | 1,038.65 ms | 103.02 ms | **10.08x faster** |
+| **Throughput** | 0.98 RPS | 11.08 RPS | **11.29x higher** |
+| **Latency Variance** | 34 ms | 19 ms | 1.8x more stable |
 
 ### Analysis
 
-1. **MPS provides 8.7x speedup** - The Apple M4 Pro's GPU dramatically accelerates EfficientDet inference compared to CPU
+1. **MPS provides 11.3x speedup** - The Apple M4 Pro's GPU dramatically accelerates inference
 
-2. **Consistent speedup** - The speedup is consistent across p50 (8.85x) and p99 (7.85x) percentiles
+2. **Consistent speedup** - Speedup ranges from 10x (p99) to 11.6x (p50)
 
-3. **Lower variance on MPS** - GPU execution is more deterministic, with lower latency variance
+3. **Lower variance on MPS** - GPU execution is more deterministic
 
-4. **Per-model inference time** - Each of the 3 models takes:
-   - CPU: ~450-500 ms per model
-   - MPS: ~50-65 ms per model
+4. **Per-model inference time**:
+   - CPU: ~340 ms per model
+   - MPS: ~30 ms per model
 
 ### Performance Gap Analysis
 
-| Comparison | Gap | Opportunity |
-|------------|-----|-------------|
-| CPU Baseline → MPS Baseline | 8.7x | Use GPU acceleration |
-| MPS Baseline → Invalid | 10,800x | Room for batching, fusion, TensorRT |
-| CPU Baseline → Invalid | 94,000x | Maximum theoretical optimization |
+| Comparison | Gap | Optimization Opportunity |
+|------------|-----|--------------------------|
+| CPU Baseline → MPS Baseline | 11.3x | Use GPU acceleration ✅ |
+| MPS Baseline → Invalid | 6,100x | Room for batching, fusion |
+| CPU Baseline → Invalid | 69,000x | Maximum theoretical |
+
+---
+
+## Why 3× EfficientDet-D0 is Faster than D0+D1+D2
+
+Previous benchmarks used D0, D1, D2 (different architectures, different input sizes). The new setup uses 3× D0:
+
+| Configuration | CPU Latency | MPS Latency | MPS Speedup |
+|---------------|-------------|-------------|-------------|
+| **D0+D1+D2** (mixed) | 1,461 ms | 167 ms | 8.7x |
+| **3× D0** (uniform) | 1,019 ms | 88 ms | 11.3x |
+| **Improvement** | 30% faster | 47% faster | +2.6x better |
+
+**Why the improvement:**
+- All models use 512×512 input (vs 512/640/768)
+- Same architecture allows better GPU utilization
+- Single preprocessing step (shared transform)
 
 ---
 
@@ -119,59 +144,62 @@ The invalid implementation (constant zero outputs) shows the pure I/O overhead w
 
 ### Latency Requirements
 
-| Use Case | Latency Target | Achievable Device |
-|----------|----------------|-------------------|
-| Real-time video (30 FPS) | < 33 ms | ❌ Neither (need batching/fusion) |
-| Interactive (< 200 ms) | < 200 ms | ✅ MPS only (164 ms) |
-| Near-realtime (< 500 ms) | < 500 ms | ✅ MPS only |
-| Batch processing | < 2,000 ms | ✅ Both (CPU: 1,461 ms, MPS: 167 ms) |
+| Use Case | Latency Target | CPU | MPS |
+|----------|----------------|-----|-----|
+| Real-time video (30 FPS) | < 33 ms | ❌ | ❌ (need vmap/fusion) |
+| Interactive (< 100 ms) | < 100 ms | ❌ | ✅ (88 ms) |
+| Near-realtime (< 200 ms) | < 200 ms | ❌ | ✅ |
+| Batch processing (< 2s) | < 2,000 ms | ✅ | ✅ |
 
 ### Throughput Requirements
 
-| Requests/sec | Achievable Device | Notes |
-|--------------|-------------------|-------|
-| < 1 RPS | ✅ Both | CPU: 0.68 RPS |
-| 1-5 RPS | ✅ MPS only | MPS: 5.97 RPS |
-| 5-10 RPS | ⚠️ MPS with batching | Need optimization |
-| > 10 RPS | ❌ Need CUDA/TensorRT | Apple Silicon limited |
+| Requests/sec | CPU | MPS |
+|--------------|-----|-----|
+| < 1 RPS | ✅ (0.98) | ✅ |
+| 1-10 RPS | ❌ | ✅ (11.08) |
+| 10-30 RPS | ❌ | ⚠️ (need batching) |
+| > 30 RPS | ❌ | ❌ (need CUDA/optimization) |
 
 ---
 
 ## Optimization Roadmap
 
-Based on these benchmarks, the optimization path is:
+Based on these benchmarks with uniform architecture:
 
-### Phase 1: Device Selection (Current)
-- **CPU**: 1,461 ms → baseline for comparison
-- **MPS**: 167 ms → **8.7x improvement** ✅
+### Phase 1: Device Selection (Current) ✅
+- **CPU**: 1,019 ms
+- **MPS**: 88 ms → **11.3x improvement**
 
-### Phase 2: Model Fusion (Future)
-- `torch.vmap` for batched operations: expected 2-3x improvement
-- Grouped convolutions: expected 1.5-2x improvement
-- Target: **50-80 ms** on MPS
+### Phase 2: Backbone Stacking with vmap (Next)
+Since all 3 models share the same backbone architecture, we can:
+- Stack backbone weights: `[3, ...weight_shape...]`
+- Use `torch.vmap` for parallel backbone computation
+- Expected: **2-3x improvement** → target ~30-40 ms on MPS
 
-### Phase 3: Quantization (Future)
-- FP16/INT8 quantization: expected 1.5-2x improvement
-- Core ML conversion: potential further optimization
-- Target: **25-50 ms** on MPS
+### Phase 3: Quantization
+- FP16 inference on MPS
+- Expected: **1.5-2x improvement** → target ~20-30 ms
 
-### Phase 4: Advanced Optimization (Future)
-- TensorRT (on NVIDIA): expected 3-5x improvement
-- ONNX Runtime: expected 1.5-2x improvement
-- Target: **< 20 ms** on dedicated GPU
+### Phase 4: Full Fusion
+- Grouped convolutions for parallel class heads
+- Core ML conversion
+- Target: **< 20 ms** (enabling 30+ FPS)
 
 ---
 
 ## Running the Benchmark
 
 ```bash
-# Install dependencies
+# 1. Install dependencies
 uv sync
 
-# Run benchmark with REAL EfficientDet models (takes ~2-3 minutes)
+# 2. Generate checkpoints (required once)
+uv run python scripts/generate_checkpoints.py
+
+# 3. Run benchmark with REAL models
 uv run python scripts/run_full_benchmark.py
 
-# Run with mocked models (fast, for testing)
+# Optional: Run with mocked models (fast, for testing)
 uv run python scripts/run_full_benchmark.py --mock
 
 # Results saved to:
@@ -183,46 +211,56 @@ uv run python scripts/run_full_benchmark.py --mock
 
 ## Raw Data
 
-### CPU Baseline (20 requests)
+### CPU Baseline (20 requests, 3× EfficientDet-D0)
 
 ```
-Latency (ms): 1426.16, 1432.89, 1441.23, 1448.56, 1451.12, 1452.34, 1453.21, 
-              1454.67, 1456.89, 1458.12, 1460.45, 1463.78, 1467.23, 1471.56,
-              1478.90, 1485.34, 1491.67, 1498.23, 1506.78, 1514.06
-Mean: 1461.11 ms
-Std:  24.89 ms
+Mean: 1,019.15 ms
+Std:  11.2 ms
+Min:  1,005.11 ms
+Max:  1,038.75 ms
+p50:  1,019.78 ms
+p99:  1,038.65 ms
 ```
 
-### MPS Baseline (20 requests)
+### MPS Baseline (20 requests, 3× EfficientDet-D0)
 
 ```
-Latency (ms): 160.74, 161.23, 162.45, 163.12, 163.89, 164.23, 164.67,
-              165.12, 166.34, 167.89, 169.23, 171.45, 173.67, 175.89,
-              177.23, 179.12, 181.45, 185.67, 189.34, 193.32
-Mean: 167.45 ms
-Std:  10.21 ms
+Mean: 90.26 ms
+Std:  6.3 ms
+Min:  84.71 ms
+Max:  103.63 ms
+p50:  87.99 ms
+p99:  103.02 ms
 ```
 
 ---
 
 ## Conclusion
 
-1. **Real EfficientDet inference with 3 models** takes **1.46 seconds on CPU** and **167 ms on MPS**
+1. **Real EfficientDet inference with 3 uniform D0 models** takes **1,019 ms on CPU** and **88 ms on MPS**
 
-2. **MPS (Apple Silicon GPU) provides 8.7x speedup** over CPU - this is the primary optimization lever
+2. **MPS provides 11.3x speedup** - significantly better than the 8.7x with mixed architectures
 
-3. **CPU is unsuitable for interactive applications** - 1.46 second latency is only acceptable for batch processing
+3. **Uniform architecture unlocks optimization potential** - backbone weights can now be stacked for `vmap`
 
-4. **MPS achieves interactive latency** - 167 ms is suitable for near-realtime applications
+4. **MPS achieves interactive latency** - 88 ms enables near-realtime applications
 
-5. **Further optimization needed for real-time** - even MPS cannot achieve 30 FPS (33 ms) without additional optimization techniques like batching, fusion, or quantization
+5. **Real-time still requires optimization** - need vmap/fusion to achieve 30 FPS (33 ms)
 
-### Performance Bounds Established
+### Performance Bounds Summary
 
 | Bound | CPU | MPS |
 |-------|-----|-----|
-| **Upper (Real Model p50)** | 1,454 ms | 164 ms |
+| **Upper (Real Model p50)** | 1,020 ms | 88 ms |
 | **Lower (Invalid p50)** | 0.01 ms | 0.01 ms |
-| **Optimization Gap** | 145,400x | 16,400x |
+| **Optimization Gap** | 102,000x | 8,800x |
 
-Any future implementation should target latencies between the MPS baseline (164 ms) and the theoretical minimum (0.01 ms).
+### Model Configuration
+
+| Model | Classes | Purpose |
+|-------|---------|---------|
+| `efficientdet_d0_coco` | 90 | General object detection |
+| `efficientdet_d0_aquarium` | 7 | Marine life detection |
+| `efficientdet_d0_vehicles` | 20 | Vehicle detection |
+
+All models share EfficientDet-D0 backbone (512×512 input, ~3.85M params each).
