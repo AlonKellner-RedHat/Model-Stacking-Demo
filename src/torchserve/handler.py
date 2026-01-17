@@ -235,8 +235,11 @@ class EfficientDetHandler(BaseHandler):
     def inference(self, images: List[Image.Image]) -> List[List["DetectionOutput"]]:
         """Run inference on preprocessed images.
         
+        Supports dynamic batching from TorchServe - when multiple requests
+        arrive within max_batch_delay, they are batched together here.
+        
         Args:
-            images: List of PIL Image objects
+            images: List of PIL Image objects (may be batched by TorchServe)
             
         Returns:
             List of detection outputs (one list per image, containing outputs from all models)
@@ -255,7 +258,13 @@ class EfficientDetHandler(BaseHandler):
             self._warmup_done = True
             logger.info("Warmup complete")
         
+        batch_size = len(images)
+        if batch_size > 1:
+            logger.debug(f"Processing batch of {batch_size} images (dynamic batching)")
+        
         # Run inference on each image
+        # TODO: True batched inference would stack images into single tensor
+        # For now, we process sequentially but benefit from amortized overhead
         all_outputs = []
         for image in images:
             outputs = self.impl.predict(image)

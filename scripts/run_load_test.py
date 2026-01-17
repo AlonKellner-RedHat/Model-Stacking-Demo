@@ -62,6 +62,16 @@ class LoadTestConfig:
             "optimization": "vmap_backbone",
             "description": "vmap backbone optimization",
         },
+        "baseline_batch4": {
+            "optimization": "baseline",
+            "batch_size": 4,
+            "description": "Baseline with batch_size=4",
+        },
+        "vmap_batch4": {
+            "optimization": "vmap_backbone",
+            "batch_size": 4,
+            "description": "vmap with batch_size=4",
+        },
         "torchserve_baseline": {
             "optimization": "baseline",
             "torchserve": True,
@@ -71,6 +81,20 @@ class LoadTestConfig:
             "optimization": "vmap_backbone",
             "torchserve": True,
             "description": "TorchServe embedded (vmap)",
+        },
+    }
+    
+    # Configurations that support concurrent users (for dynamic batching tests)
+    CONCURRENT_CONFIGS = {
+        "baseline_concurrent": {
+            "optimization": "baseline",
+            "concurrent_users": 4,
+            "description": "Baseline with 4 concurrent users",
+        },
+        "vmap_concurrent": {
+            "optimization": "vmap_backbone",
+            "concurrent_users": 4,
+            "description": "vmap with 4 concurrent users",
         },
     }
 
@@ -217,12 +241,14 @@ class LoadTestRunner:
         self,
         config_name: str,
         optimization: str,
+        batch_size: int = 1,
     ) -> Dict[str, Any]:
         """Run embedded mode load test.
         
         Args:
             config_name: Configuration name for reporting
             optimization: Optimization type
+            batch_size: Number of images per inference call
             
         Returns:
             Test results dictionary
@@ -231,7 +257,7 @@ class LoadTestRunner:
         from src.models.optimizations.base import OptimizationConfig
         
         print(f"\n{'='*60}")
-        print(f"LOAD TEST: {config_name} (embedded mode)")
+        print(f"LOAD TEST: {config_name} (embedded mode, batch_size={batch_size})")
         print(f"{'='*60}")
         
         # Create optimization config
@@ -249,12 +275,30 @@ class LoadTestRunner:
         impl.load()
         impl.warmup()
         
-        # Create predict function
-        def predict_fn():
-            return impl.predict(self.test_image)
+        # Create batch of test images
+        if batch_size > 1:
+            test_images = [create_test_image() for _ in range(batch_size)]
+            
+            def predict_fn():
+                # Batched inference - process multiple images
+                return impl.predict_batch(test_images)
+            
+            mode = f"embedded_batch{batch_size}"
+        else:
+            def predict_fn():
+                return impl.predict(self.test_image)
+            mode = "embedded"
         
         # Run load test
-        return self._run_continuous_load_test(predict_fn, config_name, "embedded")
+        result = self._run_continuous_load_test(predict_fn, config_name, mode)
+        
+        # For batched tests, adjust the metrics to be per-image
+        if batch_size > 1:
+            result["batch_size"] = batch_size
+            result["images_per_second"] = round(result["rps"] * batch_size, 2)
+            result["latency_per_image_ms"] = round(result["latency_mean_ms"] / batch_size, 2)
+        
+        return result
     
     def run_torchserve_embedded_test(
         self,
@@ -294,6 +338,158 @@ class LoadTestRunner:
             # Cleanup
             embedded.stop()
     
+    def run_concurrent_test(
+        self,
+        config_name: str,
+        optimization: str,
+        num_workers: int = 4,
+    ) -> Dict[str, Any]:
+        """Run concurrent load test with multiple worker threads.
+        
+        This simulates real-world scenarios where multiple clients send
+        requests simultaneously. For MPS/CUDA, we need to serialize access
+        to the model, but this still measures queueing behavior.
+        
+        NOTE: MPS does not support concurrent GPU access from multiple threads.
+        For true concurrent GPU inference, use CUDA with proper stream management
+        or run multiple model instances.
+        
+        Args:
+            config_name: Configuration name for reporting
+            optimization: Optimization type
+            num_workers: Number of concurrent worker threads
+            
+        Returns:
+            Test results dictionary
+        """
+        import threading
+        import queue
+        from src.models.optimized import OptimizedImpl
+        from src.models.optimizations.base import OptimizationConfig
+        
+        print(f"\n{'='*60}")
+        print(f"LOAD TEST: {config_name} (concurrent, {num_workers} workers)")
+        print(f"{'='*60}")
+        
+        # Create optimization config
+        if optimization == "baseline":
+            config = OptimizationConfig()
+        elif optimization == "compile":
+            config = OptimizationConfig(compile_enabled=True)
+        elif optimization == "vmap_backbone":
+            config = OptimizationConfig(vmap_backbone_enabled=True)
+        else:
+            config = OptimizationConfig()
+        
+        print(f"Loading model with config: {config}")
+        impl = OptimizedImpl(device=self.device, optimization_config=config)
+        impl.load()
+        impl.warmup()
+        
+        # Shared state for workers
+        results_queue: queue.Queue = queue.Queue()
+        stop_event = threading.Event()
+        model_lock = threading.Lock()  # Serialize model access for MPS
+        
+        # Create test images for each worker
+        test_images = [create_test_image() for _ in range(num_workers)]
+        
+        def worker(worker_id: int, test_image: Image.Image):
+            """Worker function that continuously runs inference."""
+            while not stop_event.is_set():
+                try:
+                    start = time.perf_counter()
+                    # Serialize access to model (required for MPS)
+                    with model_lock:
+                        impl.predict(test_image)
+                    latency_ms = (time.perf_counter() - start) * 1000
+                    results_queue.put(("success", latency_ms))
+                except Exception as e:
+                    results_queue.put(("error", str(e)))
+        
+        print(f"\nStarting {num_workers} concurrent workers (serialized for MPS)...")
+        print(f"Duration: {self.duration}s")
+        print("NOTE: MPS requires serialized access. Latency includes queue time.")
+        
+        # Start workers
+        threads = []
+        for i in range(num_workers):
+            t = threading.Thread(target=worker, args=(i, test_images[i]))
+            t.daemon = True
+            threads.append(t)
+        
+        start_time = time.perf_counter()
+        for t in threads:
+            t.start()
+        
+        # Wait for duration
+        last_report = start_time
+        while time.perf_counter() - start_time < self.duration:
+            time.sleep(0.1)
+            if time.perf_counter() - last_report >= 10:
+                elapsed = time.perf_counter() - start_time
+                size = results_queue.qsize()
+                print(f"  [{elapsed:.0f}s] Requests: {size}")
+                last_report = time.perf_counter()
+        
+        # Stop workers
+        print("\nStopping workers...")
+        stop_event.set()
+        for t in threads:
+            t.join(timeout=1.0)
+        
+        total_time = time.perf_counter() - start_time
+        
+        # Collect results
+        latencies_ms = []
+        errors = 0
+        while not results_queue.empty():
+            status, value = results_queue.get_nowait()
+            if status == "success":
+                latencies_ms.append(value)
+            else:
+                errors += 1
+        
+        if latencies_ms:
+            latencies_sorted = sorted(latencies_ms)
+            n = len(latencies_sorted)
+            
+            result = {
+                "config": config_name,
+                "mode": f"concurrent_{num_workers}_workers",
+                "users": num_workers,
+                "spawn_rate": self.spawn_rate,
+                "duration_s": round(total_time, 2),
+                "device": self.device,
+                "timestamp": datetime.now().isoformat(),
+                
+                # Throughput
+                "total_requests": len(latencies_ms),
+                "total_failures": errors,
+                "rps": round(len(latencies_ms) / total_time, 2),
+                "fail_ratio": round((errors / max(1, len(latencies_ms) + errors)) * 100, 2),
+                
+                # Latency (ms) - includes queue wait time for concurrent tests
+                "latency_mean_ms": round(sum(latencies_ms) / n, 2),
+                "latency_min_ms": round(latencies_sorted[0], 2),
+                "latency_max_ms": round(latencies_sorted[-1], 2),
+                "latency_p50_ms": round(latencies_sorted[int(n * 0.5)], 2),
+                "latency_p90_ms": round(latencies_sorted[int(n * 0.9)], 2),
+                "latency_p95_ms": round(latencies_sorted[int(n * 0.95)], 2),
+                "latency_p99_ms": round(latencies_sorted[min(int(n * 0.99), n - 1)], 2),
+            }
+        else:
+            result = {
+                "config": config_name,
+                "mode": f"concurrent_{num_workers}_workers",
+                "error": "No successful requests",
+            }
+        
+        self._print_result(result)
+        self.results.append(result)
+        
+        return result
+    
     def _print_result(self, result: Dict[str, Any]) -> None:
         """Print formatted test result."""
         print(f"\n{'='*60}")
@@ -328,12 +524,23 @@ class LoadTestRunner:
         Returns:
             Test results
         """
-        if config_name not in LoadTestConfig.CONFIGS:
-            raise ValueError(f"Unknown config: {config_name}")
+        # Check both CONFIGS and CONCURRENT_CONFIGS
+        all_configs = {**LoadTestConfig.CONFIGS, **LoadTestConfig.CONCURRENT_CONFIGS}
         
-        config = LoadTestConfig.CONFIGS[config_name]
+        if config_name not in all_configs:
+            raise ValueError(f"Unknown config: {config_name}. Available: {list(all_configs.keys())}")
         
-        if config.get("torchserve"):
+        config = all_configs[config_name]
+        batch_size = config.get("batch_size", 1)
+        concurrent_users = config.get("concurrent_users", 0)
+        
+        if concurrent_users > 0:
+            return self.run_concurrent_test(
+                config_name,
+                config["optimization"],
+                num_workers=concurrent_users,
+            )
+        elif config.get("torchserve"):
             return self.run_torchserve_embedded_test(
                 config_name,
                 config["optimization"],
@@ -342,10 +549,14 @@ class LoadTestRunner:
             return self.run_embedded_test(
                 config_name,
                 config["optimization"],
+                batch_size=batch_size,
             )
     
-    def run_all_configs(self) -> List[Dict[str, Any]]:
+    def run_all_configs(self, include_concurrent: bool = False) -> List[Dict[str, Any]]:
         """Run load tests for all configurations.
+        
+        Args:
+            include_concurrent: Whether to include concurrent tests
         
         Returns:
             List of all test results
@@ -354,7 +565,11 @@ class LoadTestRunner:
         print("RUNNING ALL CONFIGURATIONS")
         print("="*60)
         
-        for config_name in LoadTestConfig.CONFIGS:
+        configs_to_run = list(LoadTestConfig.CONFIGS.keys())
+        if include_concurrent:
+            configs_to_run.extend(LoadTestConfig.CONCURRENT_CONFIGS.keys())
+        
+        for config_name in configs_to_run:
             try:
                 self.run_config(config_name)
             except Exception as e:
@@ -440,6 +655,9 @@ class LoadTestRunner:
 
 
 def main():
+    # Combine all configs for choices
+    all_config_names = list(LoadTestConfig.CONFIGS.keys()) + list(LoadTestConfig.CONCURRENT_CONFIGS.keys())
+    
     parser = argparse.ArgumentParser(
         description="Run load tests on inference implementations"
     )
@@ -451,13 +669,18 @@ def main():
     )
     parser.add_argument(
         "--config",
-        choices=list(LoadTestConfig.CONFIGS.keys()),
+        choices=all_config_names,
         help="Configuration to test",
     )
     parser.add_argument(
         "--all",
         action="store_true",
-        help="Run all configurations",
+        help="Run all standard configurations",
+    )
+    parser.add_argument(
+        "--include-concurrent",
+        action="store_true",
+        help="Include concurrent configurations when using --all",
     )
     parser.add_argument(
         "--users",
@@ -504,7 +727,7 @@ def main():
     
     # Run tests
     if args.all:
-        runner.run_all_configs()
+        runner.run_all_configs(include_concurrent=args.include_concurrent)
     else:
         runner.run_config(args.config)
     

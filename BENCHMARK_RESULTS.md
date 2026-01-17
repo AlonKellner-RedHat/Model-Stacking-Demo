@@ -438,13 +438,141 @@ uv run python scripts/run_load_test.py --config vmap_backbone --duration 60
 # Run all configurations
 uv run python scripts/run_load_test.py --all --duration 60
 
-# Custom settings
-uv run python scripts/run_load_test.py --config baseline --duration 120 --device mps
+# Include concurrent user tests
+uv run python scripts/run_load_test.py --all --include-concurrent --duration 30
 
 # Results saved to:
 # - outputs/load_test/load_test_results.json
 # - outputs/load_test/load_test_report.txt
 ```
+
+---
+
+## Bottleneck Analysis
+
+We profiled inference to identify bottlenecks at each stage.
+
+### Baseline (Sequential) Breakdown
+
+| Stage | Time (ms) | % of Total |
+|-------|-----------|------------|
+| Forward pass (3 models) | 86.6 | **99.9%** |
+| Post-processing | 0.1 | 0.1% |
+| **Total** | 86.7 | 100% |
+
+**Finding:** Forward pass is the PRIMARY bottleneck for sequential inference.
+
+### vmap_backbone Breakdown  
+
+| Stage | Time (ms) | % of Total |
+|-------|-----------|------------|
+| Vmapped forward (backbone+FPN+box) | 17.2 | 54% |
+| Post-processing (3 models) | 14.9 | **46%** |
+| **Total** | 32.1 | 100% |
+
+**Finding:** Post-processing becomes a significant bottleneck after optimizing forward pass!
+
+### Per-Model Component Analysis
+
+| Component | Time (ms) | % of Forward |
+|-----------|-----------|--------------|
+| **FPN (BiFPN)** | 13.5 | **46%** ← Largest |
+| Backbone (EfficientNet-B0) | 9.8 | 34% |
+| Class Net | 3.0 | 10% |
+| Box Net | 2.9 | 10% |
+
+**Key insight:** FPN is the largest component, not the backbone!
+
+### Optimization Impact Analysis
+
+| Metric | Baseline | vmap | Speedup |
+|--------|----------|------|---------|
+| Forward time | 86.6 ms | 17.2 ms | **5.0x** |
+| Post-process time | 0.1 ms | 14.9 ms | 0.01x (slower) |
+| Total time | 86.7 ms | 32.1 ms | **2.7x** |
+
+**Why vmap forward is 5x faster but total is only 2.7x:**
+- Post-processing now takes 46% of total time
+- Room for optimization: parallelize NMS across models
+
+---
+
+## Batching Analysis
+
+Tested image batching (processing multiple images per inference call).
+
+### Results
+
+| Config | Batch Size | RPS | Images/sec | Per-Image Latency |
+|--------|-----------|-----|------------|-------------------|
+| baseline | 1 | 12.2 | 12.2 | 80.2 ms |
+| baseline | 4 | 2.75 | 11.0 | 90.2 ms |
+| vmap | 1 | 29.2 | 29.2 | 33.9 ms |
+| vmap | 4 | 7.32 | 29.3 | 33.6 ms |
+
+### Key Finding: Batching Provides No Benefit Currently
+
+**Why?** The current `predict_batch` implementation is a sequential loop:
+
+```python
+def predict_batch(self, images):
+    return [self.predict(image) for image in images]  # Sequential!
+```
+
+True batching would require stacking images into a single tensor and running one forward pass.
+
+### TorchServe Dynamic Batching
+
+TorchServe supports dynamic batching via config:
+
+```properties
+batch_size=4
+max_batch_delay=50  # Wait up to 50ms to accumulate requests
+```
+
+**Current Status:**
+- Config enabled but handler processes images sequentially
+- To fully benefit, handler needs to stack images into batched tensor
+- MPS doesn't support concurrent GPU access from threads
+
+---
+
+## Concurrent Load Analysis
+
+Tested with multiple concurrent workers to simulate real traffic.
+
+### Results (4 concurrent workers, MPS)
+
+| Config | RPS | p50 (ms) | p99 (ms) | Queue Wait |
+|--------|-----|----------|----------|------------|
+| baseline_concurrent | 10.7 | 371.8 | 678.9 | ~290 ms |
+| vmap_concurrent | 28.6 | 138.2 | 250.4 | ~100 ms |
+
+### Comparison: Single vs Concurrent
+
+| Config | 1 User RPS | 4 Users RPS | 1 User p50 | 4 Users p50 |
+|--------|------------|-------------|------------|-------------|
+| baseline | 12.2 | 10.7 | 80.2 ms | 371.8 ms |
+| vmap | 29.2 | 28.6 | 33.9 ms | 138.2 ms |
+
+### Key Findings
+
+1. **RPS stays similar** under concurrent load (MPS is serialized)
+2. **Latency increases ~4x** with 4 workers (queue waiting)
+3. **vmap still 2.7x faster** than baseline under concurrent load
+4. **MPS limitation:** Apple Silicon GPU doesn't support concurrent access
+
+### Implications for Production
+
+For MPS (Apple Silicon):
+- Single request path is optimal
+- Multiple workers increase latency without improving throughput
+- Consider request queuing with batching at application level
+
+For CUDA (NVIDIA):
+- Can use CUDA streams for concurrent inference
+- Dynamic batching can improve throughput significantly
+- TorchServe's batching becomes more valuable
 
 ---
 
