@@ -144,46 +144,92 @@ Previous benchmarks used D0, D1, D2 (different architectures, different input si
 
 ### Latency Requirements
 
-| Use Case | Latency Target | CPU | MPS |
-|----------|----------------|-----|-----|
-| Real-time video (30 FPS) | < 33 ms | ❌ | ❌ (need vmap/fusion) |
-| Interactive (< 100 ms) | < 100 ms | ❌ | ✅ (88 ms) |
-| Near-realtime (< 200 ms) | < 200 ms | ❌ | ✅ |
-| Batch processing (< 2s) | < 2,000 ms | ✅ | ✅ |
+| Use Case | Latency Target | CPU | MPS | MPS + compile |
+|----------|----------------|-----|-----|---------------|
+| Real-time video (30 FPS) | < 33 ms | ❌ | ❌ | ⚠️ (need vmap) |
+| Interactive (< 50 ms) | < 50 ms | ❌ | ❌ | ✅ (43 ms) |
+| Interactive (< 100 ms) | < 100 ms | ❌ | ✅ (88 ms) | ✅ |
+| Near-realtime (< 200 ms) | < 200 ms | ❌ | ✅ | ✅ |
+| Batch processing (< 2s) | < 2,000 ms | ✅ | ✅ | ✅ |
 
 ### Throughput Requirements
 
-| Requests/sec | CPU | MPS |
-|--------------|-----|-----|
-| < 1 RPS | ✅ (0.98) | ✅ |
-| 1-10 RPS | ❌ | ✅ (11.08) |
-| 10-30 RPS | ❌ | ⚠️ (need batching) |
-| > 30 RPS | ❌ | ❌ (need CUDA/optimization) |
+| Requests/sec | CPU | MPS | MPS + compile |
+|--------------|-----|-----|---------------|
+| < 1 RPS | ✅ (0.98) | ✅ | ✅ |
+| 1-10 RPS | ❌ | ✅ (11.08) | ✅ |
+| 10-20 RPS | ❌ | ⚠️ | ✅ (23 RPS) |
+| 20-30 RPS | ❌ | ❌ | ⚠️ (need batching) |
+| > 30 RPS | ❌ | ❌ | ❌ (need CUDA) |
+
+---
+
+## Ablation Study: Optimization Techniques
+
+We tested composable optimizations to find the best configuration:
+
+### Results Summary (MPS)
+
+| Configuration | Latency (ms) | Throughput | Speedup | Status |
+|---------------|--------------|------------|---------|--------|
+| **torch.compile (reduce-overhead)** | 43.2 | 23.1 RPS | **2.13x** | ✅ Best |
+| **torch.compile (default)** | 43.5 | 23.0 RPS | **2.11x** | ✅ Excellent |
+| Baseline (no optimizations) | 92.0 | 10.9 RPS | 1.00x | Reference |
+| FP16 only | 581.2 | 1.7 RPS | 0.16x | ❌ Slower |
+| compile + FP16 | 590.5 | 1.7 RPS | 0.16x | ❌ Slower |
+
+### Key Findings
+
+1. **torch.compile provides 2.1x speedup** 
+   - Reduces latency from 92ms to 43ms
+   - Uses PyTorch's inductor backend for kernel optimization
+   - Both "default" and "reduce-overhead" modes perform similarly
+
+2. **FP16 is counterproductive on MPS**
+   - 6x slower than FP32 (581ms vs 92ms)
+   - MPS has significant FP16 conversion overhead
+   - Not recommended for Apple Silicon
+
+3. **Best configuration: torch.compile only**
+   - 43ms latency, 23 RPS throughput
+   - Enables interactive applications (< 50ms target)
+
+### Updated Performance After Optimization
+
+| Device | Config | Latency (p50) | Throughput | vs Baseline |
+|--------|--------|---------------|------------|-------------|
+| CPU | baseline | 1,020 ms | 0.98 RPS | 1.0x |
+| MPS | baseline | 88 ms | 11.08 RPS | 11.6x |
+| **MPS** | **torch.compile** | **43 ms** | **23 RPS** | **23.7x** |
 
 ---
 
 ## Optimization Roadmap
 
-Based on these benchmarks with uniform architecture:
+Based on ablation study results:
 
-### Phase 1: Device Selection (Current) ✅
+### Phase 1: Device Selection ✅
 - **CPU**: 1,019 ms
 - **MPS**: 88 ms → **11.3x improvement**
 
-### Phase 2: Backbone Stacking with vmap (Next)
+### Phase 2: torch.compile ✅
+- **MPS + compile**: 43 ms → **2.1x additional improvement**
+- **Total vs CPU**: **23.7x faster**
+
+### Phase 3: Backbone Stacking with vmap (Future)
 Since all 3 models share the same backbone architecture, we can:
 - Stack backbone weights: `[3, ...weight_shape...]`
 - Use `torch.vmap` for parallel backbone computation
-- Expected: **2-3x improvement** → target ~30-40 ms on MPS
+- Expected: **1.5-2x improvement** → target ~20-30 ms on MPS
 
-### Phase 3: Quantization
-- FP16 inference on MPS
-- Expected: **1.5-2x improvement** → target ~20-30 ms
-
-### Phase 4: Full Fusion
+### Phase 4: Full Fusion (Future)
 - Grouped convolutions for parallel class heads
 - Core ML conversion
 - Target: **< 20 ms** (enabling 30+ FPS)
+
+### ~~Phase: FP16 Quantization~~ ❌
+- **Not recommended on MPS** - causes 6x slowdown
+- May work on CUDA with proper Tensor Core support
 
 ---
 
@@ -199,12 +245,17 @@ uv run python scripts/generate_checkpoints.py
 # 3. Run benchmark with REAL models
 uv run python scripts/run_full_benchmark.py
 
+# 4. Run ablation study on optimizations
+uv run python scripts/run_ablation.py
+
 # Optional: Run with mocked models (fast, for testing)
 uv run python scripts/run_full_benchmark.py --mock
 
 # Results saved to:
 # - outputs/benchmark/benchmark_report.txt
 # - outputs/benchmark/benchmark_results.json
+# - outputs/ablation/ablation_report.txt
+# - outputs/ablation/ablation_results.json
 ```
 
 ---
