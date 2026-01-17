@@ -279,6 +279,10 @@ def generate_report(results: List[BenchmarkMetrics], output_dir: Path, system_in
             lines.append(f"  Memory: {system_info.get('memory', 'Unknown')}")
         lines.append(f"  Platform: {system_info.get('platform', 'Unknown')}")
         lines.append(f"  Python: {system_info.get('python_version', 'Unknown')}")
+        if system_info.get("real_models"):
+            lines.append("  Models: REAL EfficientDet (D0, D1, D2) - 3 models per request")
+        else:
+            lines.append("  Models: MOCKED (simulated timing)")
         lines.append("")
     
     # Group by implementation
@@ -426,6 +430,101 @@ def generate_report(results: List[BenchmarkMetrics], output_dir: Path, system_in
     return report
 
 
+def run_device_benchmark_real(device: str, images: list):
+    """Run benchmarks for a specific device using REAL EfficientDet models."""
+    import torch
+    from PIL import Image
+    import io
+    
+    print(f"\n{'=' * 60}")
+    print(f"Running REAL MODEL benchmarks on device: {device.upper()}")
+    print("=" * 60)
+    
+    # Verify device availability
+    if device == "mps":
+        if not torch.backends.mps.is_available():
+            print(f"WARNING: MPS not available, skipping MPS benchmarks")
+            return []
+        print("MPS (Metal Performance Shaders) is available")
+    elif device == "cuda":
+        if not torch.cuda.is_available():
+            print(f"WARNING: CUDA not available, skipping CUDA benchmarks")
+            return []
+        print(f"CUDA is available: {torch.cuda.get_device_name(0)}")
+    else:
+        print("Using CPU")
+    
+    # Load real models
+    print(f"\nLoading real EfficientDet models on {device.upper()}...")
+    from src.models.baseline import BaselineImpl
+    from src.models.invalid import InvalidImpl
+    
+    baseline = BaselineImpl(device=device)
+    baseline.load()
+    print(f"  Loaded baseline: {baseline.num_models} models")
+    
+    invalid = InvalidImpl(device=device)
+    invalid.load()
+    print(f"  Loaded invalid implementation")
+    
+    # Convert image bytes to PIL Images
+    pil_images = []
+    for img_bytes in images:
+        pil_images.append(Image.open(io.BytesIO(img_bytes)))
+    
+    # Define benchmark configurations for this device
+    # Using fewer requests for real models since they're slower
+    configs = [
+        # Sequential tests (baseline only - real model performance)
+        BenchmarkConfig("baseline_seq", "baseline", 1, 20, 3, device),
+        BenchmarkConfig("invalid_seq", "invalid", 1, 20, 3, device),
+    ]
+    
+    results = []
+    
+    for config in configs:
+        print(f"\nRunning: {config.name} [{device}]")
+        
+        impl = baseline if config.implementation == "baseline" else invalid
+        
+        # Warmup
+        print(f"  Warming up with {config.warmup_requests} requests...")
+        for i in range(config.warmup_requests):
+            img = pil_images[i % len(pil_images)]
+            impl.predict(img)
+        
+        # Benchmark
+        print(f"  Running {config.num_requests} requests...")
+        latencies = []
+        
+        for i in range(config.num_requests):
+            img = pil_images[i % len(pil_images)]
+            
+            start = time.perf_counter()
+            outputs = impl.predict(img)
+            end = time.perf_counter()
+            
+            latency_ms = (end - start) * 1000
+            latencies.append(latency_ms)
+            
+            if (i + 1) % 5 == 0:
+                print(f"    Completed {i + 1}/{config.num_requests} requests...")
+        
+        # Calculate metrics - BenchmarkMetrics computes derived values as properties
+        metrics = BenchmarkMetrics(
+            config=config,
+            latencies_ms=latencies,
+            errors=0,
+            vram_peak_mb=impl.get_vram_usage().get("max_allocated_mb", 0),
+        )
+        
+        results.append(metrics)
+        print(f"  Throughput: {metrics.throughput_rps:.2f} RPS")
+        print(f"  Latency P50: {metrics.latency_p50_ms:.2f}ms, P99: {metrics.latency_p99_ms:.2f}ms")
+    
+    return results
+
+
 def run_device_benchmark(device: str, images: list, use_real_models: bool = False):
     """Run benchmarks for a specific device."""
     from unittest.mock import patch, MagicMock
@@ -548,13 +647,21 @@ def run_device_benchmark(device: str, images: list, use_real_models: bool = Fals
 def main():
     import torch
     
+    # Check for --mock flag
+    use_mock = "--mock" in sys.argv
+    
     print("=" * 60)
     print("Multi-Model EfficientDet Benchmark")
     print("CPU vs MPS (Apple Silicon) Comparison")
+    if use_mock:
+        print("*** USING MOCKED MODELS (fast mode) ***")
+    else:
+        print("*** USING REAL EFFICIENTDET MODELS ***")
     print("=" * 60)
     
     # Get system information
     system_info = get_system_info()
+    system_info["real_models"] = not use_mock
     print("\n--- System Information ---")
     if "model_name" in system_info:
         print(f"  Hardware: {system_info['model_name']}")
@@ -567,23 +674,34 @@ def main():
     print(f"  MPS Available: {torch.backends.mps.is_available()}")
     
     # Create test images
-    print("\nCreating test images...")
-    images = create_test_images(50)
+    num_images = 50 if use_mock else 20
+    print(f"\nCreating {num_images} test images...")
+    images = create_test_images(num_images)
     print(f"Created {len(images)} test images")
     
     # Run benchmarks on all available devices
     all_results = []
     
-    # CPU benchmarks
-    cpu_results = run_device_benchmark("cpu", images)
-    all_results.extend(cpu_results)
-    
-    # MPS benchmarks (Apple Silicon GPU)
-    if torch.backends.mps.is_available():
-        mps_results = run_device_benchmark("mps", images)
-        all_results.extend(mps_results)
+    if use_mock:
+        # Use mocked models for fast benchmarking
+        cpu_results = run_device_benchmark("cpu", images)
+        all_results.extend(cpu_results)
+        
+        if torch.backends.mps.is_available():
+            mps_results = run_device_benchmark("mps", images)
+            all_results.extend(mps_results)
     else:
-        print("\nSkipping MPS benchmarks - MPS not available")
+        # Use REAL EfficientDet models
+        # CPU benchmarks (upper bound - slower)
+        cpu_results = run_device_benchmark_real("cpu", images)
+        all_results.extend(cpu_results)
+        
+        # MPS benchmarks (lower bound - faster with GPU)
+        if torch.backends.mps.is_available():
+            mps_results = run_device_benchmark_real("mps", images)
+            all_results.extend(mps_results)
+        else:
+            print("\nSkipping MPS benchmarks - MPS not available")
     
     # Generate report
     output_dir = Path(__file__).parent.parent / "outputs" / "benchmark"

@@ -4,7 +4,7 @@ import time
 from typing import List, Optional
 
 import torch
-from effdet import create_model, DetBenchPredict
+from effdet import create_model
 from PIL import Image
 from torchvision import transforms
 
@@ -33,7 +33,7 @@ class BaselineImpl(BaseModelImpl):
             device: Device to run inference on. If None, uses CUDA if available.
         """
         super().__init__(device)
-        self.models: List[DetBenchPredict] = []
+        self.models: List[torch.nn.Module] = []
         self.model_names: List[str] = []
         self.transforms: List[transforms.Compose] = []
 
@@ -46,20 +46,19 @@ class BaselineImpl(BaseModelImpl):
             model_name = config["name"]
             image_size = config["image_size"]
 
-            # Create model with pretrained weights
+            # Create model with pretrained weights and predict bench wrapper
+            # bench_task="predict" returns a DetBenchPredict which handles
+            # post-processing (NMS, etc.) and returns [batch, num_det, 6]
             model = create_model(
                 model_name,
                 bench_task="predict",
                 pretrained=True,
                 num_classes=90,  # COCO classes
             )
+            model.eval()
+            model.to(self.device)
             
-            # Wrap in DetBenchPredict for inference
-            bench = DetBenchPredict(model)
-            bench.eval()
-            bench.to(self.device)
-            
-            self.models.append(bench)
+            self.models.append(model)
             self.model_names.append(model_name)
             
             # Create transform for this model's input size
@@ -109,23 +108,24 @@ class BaselineImpl(BaseModelImpl):
             # Preprocess for this model
             input_tensor = self._preprocess(image, idx)
             
-            # Get original image size for scaling
-            img_info = {
-                "img_scale": torch.tensor([[1.0]], device=self.device),
-                "img_size": torch.tensor([[image.height, image.width]], device=self.device),
-            }
-            
             # Run inference with timing
+            # Synchronize for accurate timing on GPU
             if self.device.type == "cuda":
                 torch.cuda.synchronize()
+            elif self.device.type == "mps":
+                torch.mps.synchronize()
             
             start_time = time.perf_counter()
             
             with torch.no_grad():
-                detections = model(input_tensor, img_info)
+                # Model returns [batch, num_detections, 6] where each detection is
+                # [x1, y1, x2, y2, score, class_id]
+                detections = model(input_tensor)
             
             if self.device.type == "cuda":
                 torch.cuda.synchronize()
+            elif self.device.type == "mps":
+                torch.mps.synchronize()
             
             inference_time_ms = (time.perf_counter() - start_time) * 1000
             
